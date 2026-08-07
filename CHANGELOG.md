@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.6.2](https://github.com/aws-containers/retail-store-sample-app/compare/v1.6.1...v1.6.2) (2026-07-28)
+
+
+### Bug Fixes
+
+* **terraform:** align Helm provider version for EKS ([#1076](https://github.com/aws-containers/retail-store-sample-app/issues/1076)) ([76bc651](https://github.com/aws-containers/retail-store-sample-app/commit/76bc651aa77673c2759b036696c66c40ad823714))
+
+## [1.6.1](https://github.com/aws-containers/retail-store-sample-app/compare/v1.6.0...v1.6.1) (2026-05-27)
+
+
+### Bug Fixes
+
+* UI topology fallback to health endpoint ([#1048](https://github.com/aws-containers/retail-store-sample-app/issues/1048)) ([41752e1](https://github.com/aws-containers/retail-store-sample-app/commit/41752e1ca493a262c9bee974c70ecd5bd0c7aebd))
+
+## [1.6.0](https://github.com/aws-containers/retail-store-sample-app/compare/v1.5.0...v1.6.0) (2026-05-27)
+
+
+### Features
+
+* Added recommendations feature ([#1045](https://github.com/aws-containers/retail-store-sample-app/issues/1045)) ([77404ae](https://github.com/aws-containers/retail-store-sample-app/commit/77404ae224ab14ee61e9902090cd446bdf959b72))
+* Catalog search ([#973](https://github.com/aws-containers/retail-store-sample-app/issues/973)) ([2ad105a](https://github.com/aws-containers/retail-store-sample-app/commit/2ad105a160f1e8333c4dea346bfc0a09c63df952))
+
+
+### Bug Fixes
+
+* Simplify search TF configuration, support ECS ([#1046](https://github.com/aws-containers/retail-store-sample-app/issues/1046)) ([c051a22](https://github.com/aws-containers/retail-store-sample-app/commit/c051a222ec23d33985b77493e09e111d9ff72850))
+
 ## [1.5.0](https://github.com/aws-containers/retail-store-sample-app/compare/v1.4.2...v1.5.0) (2026-04-29)
 
 
