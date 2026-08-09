@@ -9,17 +9,44 @@
 #
 ####################################################################
 
+locals {
+  retail_store_manifest = templatefile("${path.module}/retail-store.yaml.tftpl", {
+    cognito_auth_config = local.cognito_auth_config
+    ui_certificate_arn  = aws_acm_certificate_validation.ui.certificate_arn
+    ui_fqdn             = local.app_fqdn
+  })
+}
+
+resource "local_file" "retail_store_manifest" {
+  filename = "${path.module}/retail-store.rendered.yaml"
+  content  = local.retail_store_manifest
+}
+
 resource "null_resource" "retail_store" {
   triggers = {
-    manifest_sha = filesha256("${path.module}/retail-store.yaml")
-    cluster_name = aws_eks_cluster.demo_eks.name
+    manifest_sha       = sha256(local.retail_store_manifest)
+    manifest_payload   = sensitive(base64encode(local.retail_store_manifest))
+    cluster_name       = aws_eks_cluster.demo_eks.name
+    openai_config_hash = sha256(var.openai_api_key)
   }
 
   provisioner "local-exec" {
     command = <<-EOT
       set -e
       aws eks update-kubeconfig --region ${var.aws_region} --name ${aws_eks_cluster.demo_eks.name}
-      kubectl apply -f ${path.module}/retail-store.yaml
+
+      if [ -n "$OPENAI_API_KEY" ]; then
+        chat_enabled=true
+      else
+        chat_enabled=false
+      fi
+
+      kubectl create secret generic retail-store-openai -n default \
+        --from-literal=chat-enabled="$chat_enabled" \
+        --from-literal=api-key="$OPENAI_API_KEY" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+      kubectl apply -f ${local_file.retail_store_manifest.filename}
 
       # Block until the ALB controller publishes the ingress hostname so the
       # kubernetes_ingress_v1 data source below sees a stable value when read.
@@ -38,12 +65,14 @@ resource "null_resource" "retail_store" {
 
   provisioner "local-exec" {
     when    = destroy
-    command = "kubectl delete -f ${path.module}/retail-store.yaml --ignore-not-found=true || true"
+    command = "printf '%s' '${self.triggers.manifest_payload}' | base64 --decode | kubectl delete -f - --ignore-not-found=true || true"
   }
 
   depends_on = [
+    aws_acm_certificate_validation.ui,
     helm_release.alb_controller,
     kubernetes_config_map.aws_auth,
+    local_file.retail_store_manifest,
     aws_cloudformation_stack.autoscaling_group,
   ]
 }
@@ -56,7 +85,7 @@ data "kubernetes_ingress_v1" "ui" {
   depends_on = [null_resource.retail_store]
 }
 
-output "ui_alb_url" {
-  value       = "http://${data.kubernetes_ingress_v1.ui.status[0].load_balancer[0].ingress[0].hostname}"
-  description = "Public URL for the retail-store UI (ALB)"
+output "ui_alb_dns_name" {
+  value       = data.kubernetes_ingress_v1.ui.status[0].load_balancer[0].ingress[0].hostname
+  description = "Application Load Balancer DNS name for the retail-store UI"
 }

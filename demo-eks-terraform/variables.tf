@@ -37,9 +37,9 @@ variable "node_role_name" {
 
 # KK Playground. Policy role must be called 'eksPolicy'
 variable "additional_policy_name" {
-    type = string
-    description = "Name of IAM::Policy created for additional permissions"
-    default = "eksPolicy"
+  type        = string
+  description = "Name of IAM::Policy created for additional permissions"
+  default     = "eksPolicy"
 }
 
 # KodeKloud sandbox caps the account at 10 vCPU / 20 GiB total. With the
@@ -63,3 +63,27 @@ variable "node_group_min_size" {
   default     = 1
 }
 
+variable "root_domain" {
+  type        = string
+  description = "Public Route 53 hosted zone name used for the application URL."
+  default     = "abhay.com"
+}
+
+variable "app_subdomain" {
+  type        = string
+  description = "Subdomain to use for the retail store UI."
+  default     = "store"
+}
+
+variable "cognito_domain_prefix" {
+  type        = string
+  description = "Optional Cognito managed login domain prefix. Leave empty to derive one automatically."
+  default     = ""
+}
+
+variable "openai_api_key" {
+  type        = string
+  description = "Optional OpenAI-compatible API key used by the retail store chat feature."
+  default     = ""
+  sensitive   = true
+}

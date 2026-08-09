@@ -34,6 +34,16 @@ on:
         required: false
         default: 'us-east-1'
 
+      root_domain:
+        description: 'Route 53 hosted zone to use for the UI URL'
+        required: false
+        default: 'abhay.com'
+
+      app_subdomain:
+        description: 'Subdomain to use for the retail store UI'
+        required: false
+        default: 'store'
+
       # ── OpenAI (optional) ────────────────────────────────────────────────────
       openai_api_key:
         description: 'OpenAI API Key (leave blank to disable AI chat in UI)'
@@ -229,11 +239,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: mysql,          source: mysql:8.0,                     repo: retail-store-sample-mysql,          tag: "8.0"        }
-          - { name: postgres,       source: postgres:16.1,                 repo: retail-store-sample-postgres,       tag: "16.1"       }
-          - { name: rabbitmq,       source: rabbitmq:3-management,         repo: retail-store-sample-rabbitmq,       tag: 3-management }
-          - { name: dynamodb-local, source: amazon/dynamodb-local:1.25.1,  repo: retail-store-sample-dynamodb-local, tag: "1.25.1"     }
-          - { name: redis,          source: redis:6.0-alpine,              repo: retail-store-sample-redis,          tag: 6.0-alpine   }
+          - { name: mysql,          source: "mysql:8.0",                    repo: retail-store-sample-mysql,          tag: "8.0"        }
+          - { name: postgres,       source: "postgres:16.1",                repo: retail-store-sample-postgres,       tag: "16.1"       }
+          - { name: rabbitmq,       source: "rabbitmq:3-management",        repo: retail-store-sample-rabbitmq,       tag: 3-management }
+          - { name: dynamodb-local, source: "amazon/dynamodb-local:1.25.1", repo: retail-store-sample-dynamodb-local, tag: "1.25.1"     }
+          - { name: redis,          source: "redis:6.0-alpine",             repo: retail-store-sample-redis,          tag: 6.0-alpine   }
     steps:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -299,22 +309,51 @@ jobs:
           cache-from: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ matrix.repo }}:cache
           cache-to:   type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ matrix.repo }}:cache,mode=max
 
-  # ── 6. Terraform — EKS cluster + deploy app ──────────────────────────────
+  # ── 6. Terraform static checks ───────────────────────────────────────────
+  terraform-checks:
+    name: Terraform checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform ${{ env.TF_VERSION }}
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive ${{ env.TF_DIR }}
+
+      - name: Terraform Init Without Backend
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -backend=false -input=false -lockfile=readonly
+
+      - name: Terraform Validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate -no-color
+
+  # ── 7. Terraform — EKS cluster + deploy app ──────────────────────────────
   # Uses demo-eks-terraform/ (committed in this repo) — no external repo clone needed.
-  # Patches retail-store.yaml image URLs with private ECR before apply.
+  # Patches retail-store.yaml.tftpl image URLs with private ECR before apply.
   # All Terraform vars are passed explicitly — no variable defaults relied upon.
   terraform:
     name: Terraform ${{ inputs.action }}
     runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || inputs.openai_api_key }}
+      TF_VAR_openai_api_key: ${{ secrets.OPENAI_API_KEY || inputs.openai_api_key }}
     needs:
       - resolve-tag
       - bootstrap
       - create-ecr
       - build-services
       - mirror-dependencies
+      - terraform-checks
     if: |
       always() &&
       needs.bootstrap.result == 'success' &&
+      needs.terraform-checks.result == 'success' &&
       (needs.create-ecr.result          == 'success' || needs.create-ecr.result          == 'skipped') &&
       (needs.build-services.result      == 'success' || needs.build-services.result      == 'skipped') &&
       (needs.mirror-dependencies.result == 'success' || needs.mirror-dependencies.result == 'skipped')
@@ -330,13 +369,13 @@ jobs:
           aws-secret-access-key: ${{ inputs.aws_secret_access_key }}
           aws-region:            ${{ inputs.aws_region }}
 
-      # Replace all public ECR image URLs in retail-store.yaml with private ECR.
+      # Replace all public ECR image URLs in retail-store.yaml.tftpl with private ECR.
       # ECR registry and tag are derived at runtime — nothing hardcoded.
-      - name: Patch retail-store.yaml with private ECR images
+      - name: Patch retail-store.yaml.tftpl with private ECR images
         run: |
           ECR="${{ needs.bootstrap.outputs.ecr_registry }}"
           TAG="${{ needs.resolve-tag.outputs.image_tag }}"
-          YAML="${{ env.TF_DIR }}/retail-store.yaml"
+          YAML="${{ env.TF_DIR }}/retail-store.yaml.tftpl"
 
           echo "ECR registry : $ECR"
           echo "Image tag    : $TAG"
@@ -375,6 +414,7 @@ jobs:
             -backend-config="region=${{ inputs.aws_region }}" \
             -backend-config="encrypt=true" \
             -backend-config="use_lockfile=true" \
+            -lockfile=readonly \
             -input=false
 
       - name: Terraform Validate
@@ -388,6 +428,8 @@ jobs:
           terraform plan \
             -var="aws_region=${{ inputs.aws_region }}" \
             -var="cluster_name=${{ needs.bootstrap.outputs.cluster_name }}" \
+            -var="root_domain=${{ inputs.root_domain }}" \
+            -var="app_subdomain=${{ inputs.app_subdomain }}" \
             -var="use_predefined_role=${{ needs.bootstrap.outputs.use_predefined_role }}" \
             -out=tfplan \
             -input=false
@@ -411,6 +453,8 @@ jobs:
           terraform destroy \
             -var="aws_region=${{ inputs.aws_region }}" \
             -var="cluster_name=${{ needs.bootstrap.outputs.cluster_name }}" \
+            -var="root_domain=${{ inputs.root_domain }}" \
+            -var="app_subdomain=${{ inputs.app_subdomain }}" \
             -var="use_predefined_role=${{ needs.bootstrap.outputs.use_predefined_role }}" \
             -auto-approve \
             -input=false
@@ -427,10 +471,14 @@ jobs:
 
       - name: Deployment summary
         if: ${{ inputs.action == 'apply' }}
+        working-directory: ${{ env.TF_DIR }}
         run: |
           CLUSTER="${{ needs.bootstrap.outputs.cluster_name }}"
-          ALB=$(kubectl get ingress ui -n default \
-            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+          UI_URL=$(terraform output -raw ui_url 2>/dev/null || echo "pending")
+          ALB_DNS=$(terraform output -raw ui_alb_dns_name 2>/dev/null || echo "pending")
+          USER_POOL_ID=$(terraform output -raw cognito_user_pool_id 2>/dev/null || echo "pending")
+          USER_POOL_CLIENT_ID=$(terraform output -raw cognito_user_pool_client_id 2>/dev/null || echo "pending")
+          COGNITO_LOGIN_DOMAIN=$(terraform output -raw cognito_login_domain 2>/dev/null || echo "pending")
 
           echo "### Deployment Complete" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
@@ -439,4 +487,8 @@ jobs:
           echo "| Image Tag    | ${{ needs.resolve-tag.outputs.image_tag }} |" >> $GITHUB_STEP_SUMMARY
           echo "| ECR Registry | ${{ needs.bootstrap.outputs.ecr_registry }} |" >> $GITHUB_STEP_SUMMARY
           echo "| EKS Cluster  | ${CLUSTER} |" >> $GITHUB_STEP_SUMMARY
-          echo "| UI URL       | http://${ALB} |" >> $GITHUB_STEP_SUMMARY
+          echo "| UI URL       | ${UI_URL} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ALB DNS      | ${ALB_DNS} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cognito Pool | ${USER_POOL_ID} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cognito App Client | ${USER_POOL_CLIENT_ID} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cognito Login Domain | ${COGNITO_LOGIN_DOMAIN} |" >> $GITHUB_STEP_SUMMARY

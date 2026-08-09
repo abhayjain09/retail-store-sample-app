@@ -964,11 +964,20 @@ metadata:
   annotations:
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: '443'
+    alb.ingress.kubernetes.io/certificate-arn: '${ui_certificate_arn}'
+    alb.ingress.kubernetes.io/auth-type: cognito
+    alb.ingress.kubernetes.io/auth-idp-cognito: '${cognito_auth_config}'
+    alb.ingress.kubernetes.io/auth-on-unauthenticated-request: authenticate
+    alb.ingress.kubernetes.io/auth-scope: 'openid email profile'
+    alb.ingress.kubernetes.io/auth-session-cookie: retail-store-auth
+    alb.ingress.kubernetes.io/auth-session-timeout: '3600'
 spec:
   ingressClassName: alb
   rules:
-    - http:
+    - host: ${ui_fqdn}
+      http:
         paths:
           - path: /
             pathType: Prefix
@@ -1023,7 +1032,10 @@ spec:
             - name: JAVA_OPTS
               value: -XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/urandom
             - name: RETAIL_UI_CHAT_ENABLED
-              value: "true"
+              valueFrom:
+                secretKeyRef:
+                  name: retail-store-openai
+                  key: chat-enabled
             - name: RETAIL_UI_CHAT_PROVIDER
               value: "openai"
             - name: RETAIL_UI_CHAT_MODEL
@@ -1031,7 +1043,10 @@ spec:
             - name: RETAIL_UI_CHAT_OPENAI_BASE_URL
               value: "https://api.ai.kodekloud.com"
             - name: RETAIL_UI_CHAT_OPENAI_API_KEY
-              value: "sk-VoS0usxVHeOrnJB6XpCk1w"
+              valueFrom:
+                secretKeyRef:
+                  name: retail-store-openai
+                  key: api-key
             - name: METADATA_KUBERNETES_POD_NAME
               valueFrom:
                 fieldRef:
@@ -1080,4 +1095,3 @@ spec:
         - name: tmp-volume
           emptyDir:
             medium: Memory
-
