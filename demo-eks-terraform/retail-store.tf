@@ -65,7 +65,14 @@ resource "null_resource" "retail_store" {
 
   provisioner "local-exec" {
     when    = destroy
-    command = "printf '%s' '${self.triggers.manifest_payload}' | base64 --decode | kubectl delete -f - --ignore-not-found=true || true"
+    command = <<-EOT
+      manifest_payload='${lookup(self.triggers, "manifest_payload", "")}'
+      if [ -n "$manifest_payload" ]; then
+        printf '%s' "$manifest_payload" | base64 --decode | kubectl delete -f - --ignore-not-found=true || true
+      else
+        echo "Skipping manifest deletion for legacy state without a stored payload."
+      fi
+    EOT
   }
 
   depends_on = [
