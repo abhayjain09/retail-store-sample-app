@@ -37,7 +37,7 @@ resource "aws_cognito_user_pool" "retail_store" {
   }
 
   auto_verified_attributes = ["email"]
-  mfa_configuration        = "ON"
+  mfa_configuration        = "OFF"
   username_attributes      = ["email"]
 
   account_recovery_setting {
@@ -54,10 +54,6 @@ resource "aws_cognito_user_pool" "retail_store" {
     require_symbols                  = true
     require_uppercase                = true
     temporary_password_validity_days = 7
-  }
-
-  software_token_mfa_configuration {
-    enabled = true
   }
 
   user_pool_add_ons {
