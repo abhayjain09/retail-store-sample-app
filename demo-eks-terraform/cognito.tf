@@ -33,7 +33,7 @@ resource "aws_cognito_user_pool" "retail_store" {
   user_pool_tier = "PLUS"
 
   admin_create_user_config {
-    allow_admin_create_user_only = true
+    allow_admin_create_user_only = false
   }
 
   auto_verified_attributes = ["email"]
