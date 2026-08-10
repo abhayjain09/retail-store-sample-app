@@ -65,14 +65,24 @@ variable "node_group_min_size" {
 
 variable "root_domain" {
   type        = string
-  description = "Public Route 53 hosted zone name used for the application URL."
-  default     = "abhay.com"
+  description = "DuckDNS root domain used for the application URL."
+  default     = "duckdns.org"
+
+  validation {
+    condition     = lower(trim(var.root_domain, ".")) == "duckdns.org"
+    error_message = "root_domain must be duckdns.org when using the DuckDNS ACME integration."
+  }
 }
 
 variable "app_subdomain" {
   type        = string
-  description = "Subdomain to use for the retail store UI."
-  default     = "store"
+  description = "DuckDNS subdomain to use for the retail store UI."
+  default     = "abhayshreya"
+
+  validation {
+    condition     = can(regex("^[a-z0-9-]+$", lower(var.app_subdomain)))
+    error_message = "app_subdomain must contain only lowercase letters, numbers, and hyphens."
+  }
 }
 
 variable "cognito_domain_prefix" {

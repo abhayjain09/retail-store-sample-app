@@ -35,6 +35,10 @@ terraform {
       source  = "hashicorp/time"
       version = "~> 0.9"
     }
+    acme = {
+      source  = "vancluever/acme"
+      version = "~> 2.48.0"
+    }
   }
 
   # Partial backend — bucket/key/region injected at terraform init via -backend-config
@@ -49,6 +53,10 @@ variable "aws_region" {
 
 provider "aws" {
   region = var.aws_region
+}
+
+provider "acme" {
+  server_url = "https://acme-v02.api.letsencrypt.org/directory"
 }
 
 provider "kubernetes" {

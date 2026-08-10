@@ -12,7 +12,7 @@
 locals {
   retail_store_manifest = templatefile("${path.module}/retail-store.yaml.tftpl", {
     cognito_auth_config = local.cognito_auth_config
-    ui_certificate_arn  = aws_acm_certificate_validation.ui.certificate_arn
+    ui_certificate_arn  = aws_acm_certificate.ui.arn
     ui_fqdn             = local.app_fqdn
   })
 }
@@ -76,7 +76,7 @@ resource "null_resource" "retail_store" {
   }
 
   depends_on = [
-    aws_acm_certificate_validation.ui,
+    aws_acm_certificate.ui,
     helm_release.alb_controller,
     kubernetes_config_map.aws_auth,
     local_file.retail_store_manifest,
