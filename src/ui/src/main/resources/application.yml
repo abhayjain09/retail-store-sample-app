@@ -14,6 +14,9 @@ retail:
     theme: default
     disable-demo-warnings: false
     product-images-path: # /mnt/products
+    auth:
+      logout-url: ${RETAIL_UI_AUTH_LOGOUT_URL:/}
+      session-cookie-name: ${RETAIL_UI_AUTH_SESSION_COOKIE_NAME:retail-store-auth}
     endpoints:
       catalog: # http://localhost:8081
       carts: # http://localhost:8082

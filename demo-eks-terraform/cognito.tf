@@ -26,6 +26,8 @@ locals {
     userPoolClientID = aws_cognito_user_pool_client.retail_store.id
     userPoolDomain   = aws_cognito_user_pool_domain.retail_store.domain
   })
+
+  cognito_logout_url = "https://${aws_cognito_user_pool_domain.retail_store.domain}.auth.${var.aws_region}.amazoncognito.com/logout?client_id=${aws_cognito_user_pool_client.retail_store.id}&response_type=code&redirect_uri=${urlencode("https://${local.app_fqdn}/oauth2/idpresponse")}&scope=openid+email+profile"
 }
 
 resource "aws_cognito_user_pool" "retail_store" {

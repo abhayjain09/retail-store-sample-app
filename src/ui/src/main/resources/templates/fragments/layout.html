@@ -7,7 +7,7 @@
   <body>
     <!-- Navigation -->
     <nav class="bg-white">
-      <div class="max-w-4xl mx-auto px-4">
+      <div class="max-w-6xl mx-auto px-4">
         <div class="flex justify-between items-center h-16">
           <a th:href="@{/}">
             <div class="flex items-center">
@@ -15,7 +15,7 @@
               <span class="ml-2 text-xl text-gray-800">&nbsp;</span>
             </div>
           </a>
-          <div class="flex items-center space-x-12">
+          <div class="flex items-center space-x-3 sm:space-x-8 lg:space-x-12">
             <a
               id="menu-home"
               th:href="@{/}"
@@ -31,8 +31,31 @@
               >Catalog</a
             >
           </div>
-          <!-- Cart Button with Count -->
-          <div class="flex items-center">
+          <div class="flex items-center gap-2 sm:gap-3">
+            <div
+              th:if="${authenticatedUsername != null}"
+              class="flex items-center gap-1.5 text-gray-600"
+              th:title="${authenticatedUsername}"
+            >
+              <i class="fas fa-circle-user text-base"></i>
+              <span
+                class="max-w-[5.5rem] sm:max-w-[10rem] truncate text-xs sm:text-sm"
+                th:text="${authenticatedUsername}"
+                >agent@example.com</span
+              >
+            </div>
+            <a
+              th:if="${authenticatedUsername != null}"
+              th:href="@{/auth/logout}"
+              class="inline-flex items-center gap-1.5 rounded-full border border-current px-2.5 py-1.5 text-xs text-gray-600 hover:text-primary-500 transition duration-300"
+              title="Log out"
+            >
+              <i class="fas fa-arrow-right-from-bracket"></i>
+              <span class="hidden sm:inline" th:text="#{nav.logout}"
+                >Log out</span
+              >
+            </a>
+            <!-- Cart Button with Count -->
             <a th:href="@{/cart}" id="go-cart">
               <button
                 class="flex items-center gap-2 p-2 text-gray-700 hover:text-primary-500"
