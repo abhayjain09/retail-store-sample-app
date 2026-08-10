@@ -22,12 +22,14 @@ on:
 
       # ── AWS credentials ─────────────────────────────────────────────────────
       aws_access_key_id:
-        description: 'AWS Access Key ID'
-        required: true
+        description: 'AWS Access Key ID (optional when repository secret exists)'
+        required: false
+        default: ''
 
       aws_secret_access_key:
-        description: 'AWS Secret Access Key'
-        required: true
+        description: 'AWS Secret Access Key (optional when repository secret exists)'
+        required: false
+        default: ''
 
       aws_region:
         description: 'AWS Region'
@@ -35,14 +37,14 @@ on:
         default: 'us-east-1'
 
       root_domain:
-        description: 'Route 53 hosted zone to use for the UI URL'
+        description: 'DNS suffix for the UI URL'
         required: false
-        default: 'abhay.com'
+        default: 'duckdns.org'
 
       app_subdomain:
-        description: 'Subdomain to use for the retail store UI'
+        description: 'DuckDNS subdomain to use for the retail store UI'
         required: false
-        default: 'store'
+        default: 'abhayshreya'
 
       # ── OpenAI (optional) ────────────────────────────────────────────────────
       openai_api_key:
@@ -123,8 +125,8 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id:     ${{ inputs.aws_access_key_id }}
-          aws-secret-access-key: ${{ inputs.aws_secret_access_key }}
+          aws-access-key-id:     ${{ inputs.aws_access_key_id || secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ inputs.aws_secret_access_key || secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ inputs.aws_region }}
 
       - name: Derive all names from live account
@@ -196,8 +198,8 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id:     ${{ inputs.aws_access_key_id }}
-          aws-secret-access-key: ${{ inputs.aws_secret_access_key }}
+          aws-access-key-id:     ${{ inputs.aws_access_key_id || secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ inputs.aws_secret_access_key || secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ inputs.aws_region }}
 
       - name: Ensure all ECR repositories exist
@@ -248,8 +250,8 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id:     ${{ inputs.aws_access_key_id }}
-          aws-secret-access-key: ${{ inputs.aws_secret_access_key }}
+          aws-access-key-id:     ${{ inputs.aws_access_key_id || secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ inputs.aws_secret_access_key || secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ inputs.aws_region }}
 
       - name: Login to private ECR
@@ -287,8 +289,8 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id:     ${{ inputs.aws_access_key_id }}
-          aws-secret-access-key: ${{ inputs.aws_secret_access_key }}
+          aws-access-key-id:     ${{ inputs.aws_access_key_id || secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ inputs.aws_secret_access_key || secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ inputs.aws_region }}
 
       - name: Login to private ECR
@@ -341,6 +343,9 @@ jobs:
     name: Terraform ${{ inputs.action }}
     runs-on: ubuntu-latest
     env:
+      DUCKDNS_POLLING_INTERVAL: '5'
+      DUCKDNS_PROPAGATION_TIMEOUT: '180'
+      DUCKDNS_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || inputs.openai_api_key }}
       TF_VAR_openai_api_key: ${{ secrets.OPENAI_API_KEY || inputs.openai_api_key }}
     needs:
@@ -365,9 +370,20 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id:     ${{ inputs.aws_access_key_id }}
-          aws-secret-access-key: ${{ inputs.aws_secret_access_key }}
+          aws-access-key-id:     ${{ inputs.aws_access_key_id || secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ inputs.aws_secret_access_key || secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ inputs.aws_region }}
+
+      - name: Verify DuckDNS configuration
+        run: |
+          if [ -z "$DUCKDNS_TOKEN" ]; then
+            echo "Repository secret DUCKDNS_TOKEN is required."
+            exit 1
+          fi
+          if [ "${{ inputs.root_domain }}" != "duckdns.org" ]; then
+            echo "root_domain must be duckdns.org."
+            exit 1
+          fi
 
       # Replace all public ECR image URLs in retail-store.yaml.tftpl with private ECR.
       # ECR registry and tag are derived at runtime — nothing hardcoded.
@@ -446,6 +462,39 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: terraform apply -auto-approve -input=false tfplan
 
+      - name: Publish Global Accelerator IP to DuckDNS
+        if: ${{ inputs.action == 'apply' }}
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          ACCELERATOR_IP=$(terraform output -raw duckdns_ipv4_address)
+          RESPONSE=$(curl --fail --silent --show-error --get \
+            --data-urlencode "domains=${{ inputs.app_subdomain }}" \
+            --data-urlencode "token=$DUCKDNS_TOKEN" \
+            --data-urlencode "ip=$ACCELERATOR_IP" \
+            --data-urlencode "verbose=true" \
+            https://www.duckdns.org/update)
+
+          if [[ "$RESPONSE" != OK* ]]; then
+            echo "DuckDNS update failed: $RESPONSE"
+            exit 1
+          fi
+
+          echo "DuckDNS now points to $ACCELERATOR_IP"
+
+      - name: Clear DuckDNS record before destroy
+        if: ${{ inputs.action == 'destroy' }}
+        run: |
+          RESPONSE=$(curl --fail --silent --show-error --get \
+            --data-urlencode "domains=${{ inputs.app_subdomain }}" \
+            --data-urlencode "token=$DUCKDNS_TOKEN" \
+            --data-urlencode "clear=true" \
+            https://www.duckdns.org/update)
+
+          if [[ "$RESPONSE" != OK* ]]; then
+            echo "DuckDNS clear failed: $RESPONSE"
+            exit 1
+          fi
+
       - name: Terraform Destroy
         if: ${{ inputs.action == 'destroy' }}
         working-directory: ${{ env.TF_DIR }}
@@ -479,6 +528,8 @@ jobs:
           USER_POOL_ID=$(terraform output -raw cognito_user_pool_id 2>/dev/null || echo "pending")
           USER_POOL_CLIENT_ID=$(terraform output -raw cognito_user_pool_client_id 2>/dev/null || echo "pending")
           COGNITO_LOGIN_DOMAIN=$(terraform output -raw cognito_login_domain 2>/dev/null || echo "pending")
+          ACCELERATOR_IP=$(terraform output -raw duckdns_ipv4_address 2>/dev/null || echo "pending")
+          ACCELERATOR_DNS=$(terraform output -raw global_accelerator_dns_name 2>/dev/null || echo "pending")
 
           echo "### Deployment Complete" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
@@ -492,3 +543,5 @@ jobs:
           echo "| Cognito Pool | ${USER_POOL_ID} |" >> $GITHUB_STEP_SUMMARY
           echo "| Cognito App Client | ${USER_POOL_CLIENT_ID} |" >> $GITHUB_STEP_SUMMARY
           echo "| Cognito Login Domain | ${COGNITO_LOGIN_DOMAIN} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Global Accelerator IP | ${ACCELERATOR_IP} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Global Accelerator DNS | ${ACCELERATOR_DNS} |" >> $GITHUB_STEP_SUMMARY

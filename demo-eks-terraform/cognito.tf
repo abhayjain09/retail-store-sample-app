@@ -1,6 +1,6 @@
 ####################################################################
 #
-# Cognito, ACM and Route 53 resources for SSO in front of the UI ALB.
+# Cognito resources for SSO in front of the UI ALB.
 #
 ####################################################################
 
@@ -26,38 +26,6 @@ locals {
     userPoolClientID = aws_cognito_user_pool_client.retail_store.id
     userPoolDomain   = aws_cognito_user_pool_domain.retail_store.domain
   })
-}
-
-data "aws_route53_zone" "retail_store" {
-  name         = "${local.root_domain}."
-  private_zone = false
-}
-
-resource "aws_acm_certificate" "ui" {
-  domain_name       = local.app_fqdn
-  validation_method = "DNS"
-}
-
-resource "aws_route53_record" "ui_certificate_validation" {
-  for_each = {
-    for dvo in aws_acm_certificate.ui.domain_validation_options : dvo.domain_name => {
-      name   = dvo.resource_record_name
-      record = dvo.resource_record_value
-      type   = dvo.resource_record_type
-    }
-  }
-
-  allow_overwrite = true
-  zone_id         = data.aws_route53_zone.retail_store.zone_id
-  name            = each.value.name
-  type            = each.value.type
-  ttl             = 60
-  records         = [each.value.record]
-}
-
-resource "aws_acm_certificate_validation" "ui" {
-  certificate_arn         = aws_acm_certificate.ui.arn
-  validation_record_fqdns = [for record in aws_route53_record.ui_certificate_validation : record.fqdn]
 }
 
 resource "aws_cognito_user_pool" "retail_store" {
@@ -132,14 +100,6 @@ resource "aws_cognito_user_pool_client" "retail_store" {
 resource "aws_cognito_user_pool_domain" "retail_store" {
   domain       = local.cognito_domain_prefix
   user_pool_id = aws_cognito_user_pool.retail_store.id
-}
-
-resource "aws_route53_record" "ui" {
-  zone_id = data.aws_route53_zone.retail_store.zone_id
-  name    = local.app_fqdn
-  type    = "CNAME"
-  ttl     = 60
-  records = [data.kubernetes_ingress_v1.ui.status[0].load_balancer[0].ingress[0].hostname]
 }
 
 output "ui_url" {
