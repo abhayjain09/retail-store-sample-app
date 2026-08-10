@@ -462,15 +462,34 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: terraform apply -auto-approve -input=false tfplan
 
-      - name: Publish Global Accelerator IP to DuckDNS
+      - name: Publish current ALB IP to DuckDNS
         if: ${{ inputs.action == 'apply' }}
         working-directory: ${{ env.TF_DIR }}
         run: |
-          ACCELERATOR_IP=$(terraform output -raw duckdns_ipv4_address)
+          ALB_DNS=$(terraform output -raw ui_alb_dns_name)
+          ALB_IP=""
+
+          for attempt in $(seq 1 30); do
+            ALB_IP=$(curl --silent --show-error --output /dev/null \
+              --connect-timeout 10 --max-time 15 \
+              --write-out '%{remote_ip}' "http://${ALB_DNS}/" || true)
+            if [[ "$ALB_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              break
+            fi
+            echo "Waiting for the ALB DNS name to resolve ($attempt/30)..."
+            ALB_IP=""
+            sleep 10
+          done
+
+          if [ -z "$ALB_IP" ]; then
+            echo "Could not resolve an IPv4 address for $ALB_DNS"
+            exit 1
+          fi
+
           RESPONSE=$(curl --fail --silent --show-error --get \
             --data-urlencode "domains=${{ inputs.app_subdomain }}" \
             --data-urlencode "token=$DUCKDNS_TOKEN" \
-            --data-urlencode "ip=$ACCELERATOR_IP" \
+            --data-urlencode "ip=$ALB_IP" \
             --data-urlencode "verbose=true" \
             https://www.duckdns.org/update)
 
@@ -479,7 +498,7 @@ jobs:
             exit 1
           fi
 
-          echo "DuckDNS now points to $ACCELERATOR_IP"
+          echo "DuckDNS now points to ALB address $ALB_IP"
 
       - name: Clear DuckDNS record before destroy
         if: ${{ inputs.action == 'destroy' }}
@@ -514,6 +533,47 @@ jobs:
           CLUSTER="${{ needs.bootstrap.outputs.cluster_name }}"
           aws eks update-kubeconfig --region "${{ inputs.aws_region }}" --name "$CLUSTER"
 
+      - name: Configure recurring DuckDNS ALB sync
+        if: ${{ inputs.action == 'apply' }}
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          ALB_DNS=$(terraform output -raw ui_alb_dns_name)
+          SYNC_IMAGE="${{ needs.bootstrap.outputs.ecr_registry }}/retail-store-sample-ui:${{ needs.resolve-tag.outputs.image_tag }}"
+
+          kubectl create secret generic duckdns-sync -n default \
+            --from-literal=DUCKDNS_TOKEN="$DUCKDNS_TOKEN" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl create cronjob duckdns-sync -n default \
+            --schedule='*/5 * * * *' \
+            --image="$SYNC_IMAGE" \
+            --dry-run=client -o yaml \
+            -- /bin/sh -ec '
+              ALB_IP=$(curl --silent --show-error --output /dev/null \
+                --connect-timeout 10 --max-time 15 \
+                --write-out "%{remote_ip}" "http://${ALB_DNS}/")
+              case "$ALB_IP" in
+                ""|*[!0-9.]*) echo "Invalid ALB IPv4 address: $ALB_IP"; exit 1 ;;
+              esac
+              RESPONSE=$(curl --fail --silent --show-error --get \
+                --data-urlencode "domains=${DUCKDNS_DOMAIN}" \
+                --data-urlencode "token=${DUCKDNS_TOKEN}" \
+                --data-urlencode "ip=${ALB_IP}" \
+                --data-urlencode "verbose=true" \
+                https://www.duckdns.org/update)
+              case "$RESPONSE" in
+                OK*) echo "DuckDNS points to ALB address $ALB_IP" ;;
+                *) echo "DuckDNS update failed: $RESPONSE"; exit 1 ;;
+              esac
+            ' | kubectl apply -f -
+
+          kubectl set env cronjob/duckdns-sync -n default \
+            ALB_DNS="$ALB_DNS" \
+            DUCKDNS_DOMAIN="${{ inputs.app_subdomain }}"
+          kubectl set env cronjob/duckdns-sync -n default --from=secret/duckdns-sync
+          kubectl patch cronjob duckdns-sync -n default --type=merge \
+            --patch='{"spec":{"concurrencyPolicy":"Forbid","successfulJobsHistoryLimit":1,"failedJobsHistoryLimit":2}}'
+
       - name: Wait for UI deployment
         if: ${{ inputs.action == 'apply' }}
         run: kubectl rollout status deployment/ui -n default --timeout=10m
@@ -528,8 +588,9 @@ jobs:
           USER_POOL_ID=$(terraform output -raw cognito_user_pool_id 2>/dev/null || echo "pending")
           USER_POOL_CLIENT_ID=$(terraform output -raw cognito_user_pool_client_id 2>/dev/null || echo "pending")
           COGNITO_LOGIN_DOMAIN=$(terraform output -raw cognito_login_domain 2>/dev/null || echo "pending")
-          ACCELERATOR_IP=$(terraform output -raw duckdns_ipv4_address 2>/dev/null || echo "pending")
-          ACCELERATOR_DNS=$(terraform output -raw global_accelerator_dns_name 2>/dev/null || echo "pending")
+          CURRENT_IP=$(curl --silent --show-error --output /dev/null \
+            --connect-timeout 10 --max-time 15 \
+            --write-out '%{remote_ip}' "http://${ALB_DNS}/" 2>/dev/null || echo "pending")
 
           echo "### Deployment Complete" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
@@ -543,5 +604,5 @@ jobs:
           echo "| Cognito Pool | ${USER_POOL_ID} |" >> $GITHUB_STEP_SUMMARY
           echo "| Cognito App Client | ${USER_POOL_CLIENT_ID} |" >> $GITHUB_STEP_SUMMARY
           echo "| Cognito Login Domain | ${COGNITO_LOGIN_DOMAIN} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Global Accelerator IP | ${ACCELERATOR_IP} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Global Accelerator DNS | ${ACCELERATOR_DNS} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Current ALB IP in DuckDNS | ${CURRENT_IP} |" >> $GITHUB_STEP_SUMMARY
+          echo "| DuckDNS Sync | Kubernetes CronJob every 5 minutes |" >> $GITHUB_STEP_SUMMARY
