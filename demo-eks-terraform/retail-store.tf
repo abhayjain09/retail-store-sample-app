@@ -12,6 +12,7 @@
 locals {
   retail_store_manifest = templatefile("${path.module}/retail-store.yaml.tftpl", {
     cognito_auth_config = local.cognito_auth_config
+    cognito_logout_url  = local.cognito_logout_url
     ui_certificate_arn  = aws_acm_certificate.ui.arn
     ui_fqdn             = local.app_fqdn
   })

@@ -1032,6 +1032,10 @@ spec:
           env:
             - name: JAVA_OPTS
               value: -XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/urandom
+            - name: RETAIL_UI_AUTH_LOGOUT_URL
+              value: "${cognito_logout_url}"
+            - name: RETAIL_UI_AUTH_SESSION_COOKIE_NAME
+              value: "retail-store-auth"
             - name: RETAIL_UI_CHAT_ENABLED
               valueFrom:
                 secretKeyRef:
