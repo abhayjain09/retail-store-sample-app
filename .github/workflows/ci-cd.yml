@@ -462,15 +462,15 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: terraform apply -auto-approve -input=false tfplan
 
-      - name: Publish Global Accelerator IP to DuckDNS
+      - name: Publish NLB static IP to DuckDNS
         if: ${{ inputs.action == 'apply' }}
         working-directory: ${{ env.TF_DIR }}
         run: |
-          ACCELERATOR_IP=$(terraform output -raw duckdns_ipv4_address)
+          STATIC_IP=$(terraform output -raw duckdns_ipv4_address)
           RESPONSE=$(curl --fail --silent --show-error --get \
             --data-urlencode "domains=${{ inputs.app_subdomain }}" \
             --data-urlencode "token=$DUCKDNS_TOKEN" \
-            --data-urlencode "ip=$ACCELERATOR_IP" \
+            --data-urlencode "ip=$STATIC_IP" \
             --data-urlencode "verbose=true" \
             https://www.duckdns.org/update)
 
@@ -479,7 +479,7 @@ jobs:
             exit 1
           fi
 
-          echo "DuckDNS now points to $ACCELERATOR_IP"
+          echo "DuckDNS now points to $STATIC_IP"
 
       - name: Clear DuckDNS record before destroy
         if: ${{ inputs.action == 'destroy' }}
@@ -528,8 +528,8 @@ jobs:
           USER_POOL_ID=$(terraform output -raw cognito_user_pool_id 2>/dev/null || echo "pending")
           USER_POOL_CLIENT_ID=$(terraform output -raw cognito_user_pool_client_id 2>/dev/null || echo "pending")
           COGNITO_LOGIN_DOMAIN=$(terraform output -raw cognito_login_domain 2>/dev/null || echo "pending")
-          ACCELERATOR_IP=$(terraform output -raw duckdns_ipv4_address 2>/dev/null || echo "pending")
-          ACCELERATOR_DNS=$(terraform output -raw global_accelerator_dns_name 2>/dev/null || echo "pending")
+          STATIC_IP=$(terraform output -raw duckdns_ipv4_address 2>/dev/null || echo "pending")
+          NLB_DNS=$(terraform output -raw network_load_balancer_dns_name 2>/dev/null || echo "pending")
 
           echo "### Deployment Complete" >> $GITHUB_STEP_SUMMARY
           echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
@@ -543,5 +543,5 @@ jobs:
           echo "| Cognito Pool | ${USER_POOL_ID} |" >> $GITHUB_STEP_SUMMARY
           echo "| Cognito App Client | ${USER_POOL_CLIENT_ID} |" >> $GITHUB_STEP_SUMMARY
           echo "| Cognito Login Domain | ${COGNITO_LOGIN_DOMAIN} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Global Accelerator IP | ${ACCELERATOR_IP} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Global Accelerator DNS | ${ACCELERATOR_DNS} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Static NLB IP | ${STATIC_IP} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Network Load Balancer DNS | ${NLB_DNS} |" >> $GITHUB_STEP_SUMMARY
