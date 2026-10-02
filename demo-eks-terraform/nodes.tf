@@ -1,265 +1,139 @@
 ####################################################################
 #
-# Creates the unmanaged node group
-#
-# Most of these resources are terraform resources converted from
-# the CloudFormation template at
-# https://s3.us-west-2.amazonaws.com/amazon-eks/cloudformation/2022-12-23/amazon-eks-nodegroup.yaml
+# Root module: providers, terraform settings, outputs
 #
 ####################################################################
 
-
-# Create an SSH key pair for logging into the EC2 instances
-# Security note:
-# Generally not good practice to generate keys like this in Terraform
-# as the key material is stored in the state file.
-# Key pairs should be created externally and passed to Terraform as
-# a variable.
-resource "tls_private_key" "key_pair" {
-  algorithm = "RSA"
-  rsa_bits  = 4096
-}
-
-# Save the private key to local .ssh directory so it can be used by SSH clients
-resource "local_sensitive_file" "pem_file" {
-  filename        = pathexpand("~/.ssh/eks-aws.pem")
-  file_permission = "600"
-  content         = tls_private_key.key_pair.private_key_pem
-}
-
-# Upload the public key of the key pair to AWS so it can be added to the instances
-resource "aws_key_pair" "eks_kp" {
-  key_name   = "eks_kp"
-  public_key = trimspace(tls_private_key.key_pair.public_key_openssh)
-}
-
-data "aws_iam_policy_document" "assume_role_ec2" {
-  statement {
-    effect = "Allow"
-
-    principals {
-      type        = "Service"
-      identifiers = ["ec2.amazonaws.com"]
+terraform {
+  required_version = ">= 1.10.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
     }
-
-    actions = ["sts:AssumeRole"]
-  }
-}
-
-# IAM role to assign to worker nodes
-resource "aws_iam_role" "node_instance_role" {
-  name               = var.node_role_name
-  assume_role_policy = data.aws_iam_policy_document.assume_role_ec2.json
-  path               = "/"
-}
-
-resource "aws_iam_role_policy_attachment" "node_instance_role_EKSWNP" {
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
-  role       = aws_iam_role.node_instance_role.name
-}
-
-resource "aws_iam_role_policy_attachment" "node_instance_role_EKSCNIP" {
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
-  role       = aws_iam_role.node_instance_role.name
-}
-
-resource "aws_iam_role_policy_attachment" "node_instance_role_EKSCRRO" {
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-  role       = aws_iam_role.node_instance_role.name
-}
-
-resource "aws_iam_role_policy_attachment" "node_instance_role_SSMMIC" {
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-  role       = aws_iam_role.node_instance_role.name
-}
-
-# Legacy in-tree LB controller required ELB perms on worker nodes; the
-# IRSA-based aws-load-balancer-controller (alb-controller.tf) supersedes
-# that, so no inline policy on the node role is needed.
-
-# Instance profile to associate above role with worker nodes
-resource "aws_iam_instance_profile" "node_instance_profile" {
-  name = "NodeInstanceProfile"
-  path = "/"
-  role = aws_iam_role.node_instance_role.id
-}
-
-# Security group to apply to worker nodes
-resource "aws_security_group" "node_security_group" {
-  name        = "NodeSecurityGroupIngress"
-  description = "Security group for all nodes in the cluster"
-  vpc_id      = data.aws_vpc.default_vpc.id
-  tags = {
-    "Name" = "NodeSecurityGroupIngress"
-  }
-}
-
-#
-# Now follows several rules that are applied to the node security group
-# to allow control plane to access nodes
-#
-
-resource "aws_vpc_security_group_ingress_rule" "node_security_group_ingress" {
-  description                  = "Allow node to communicate with each other"
-  ip_protocol                  = "-1"
-  security_group_id            = aws_security_group.node_security_group.id
-  referenced_security_group_id = aws_security_group.node_security_group.id
-}
-
-# CloudFormation defaults to egress all. Terraform does not.
-resource "aws_vpc_security_group_egress_rule" "node_egress_all" {
-  description       = "Allow node egress to anywhere"
-  ip_protocol       = "-1"
-  cidr_ipv4         = "0.0.0.0/0"
-  security_group_id = aws_security_group.node_security_group.id
-}
-
-resource "aws_vpc_security_group_ingress_rule" "node_security_group_from_control_plane_ingress" {
-  description                  = "Allow worker Kubelets and pods to receive communication from the cluster control plane"
-  security_group_id            = aws_security_group.node_security_group.id
-  referenced_security_group_id = aws_eks_cluster.demo_eks.vpc_config[0].cluster_security_group_id
-  from_port                    = 1025
-  to_port                      = 65535
-  ip_protocol                  = "TCP"
-}
-
-resource "aws_vpc_security_group_ingress_rule" "control_plane_egress_to_node_security_group_on_443" {
-  description                  = "Allow pods running extension API servers on port 443 to receive communication from cluster control plane"
-  security_group_id            = aws_security_group.node_security_group.id
-  referenced_security_group_id = aws_eks_cluster.demo_eks.vpc_config[0].cluster_security_group_id
-  from_port                    = 443
-  to_port                      = 443
-  ip_protocol                  = "TCP"
-}
-
-#
-# Now follows several rules that are applied to the EKS cluster security group
-# to allow nodes to access control plane
-#
-
-resource "aws_vpc_security_group_ingress_rule" "cluster_control_plane_security_group_ingress" {
-  description                  = "Allow pods to communicate with the cluster API Server"
-  from_port                    = 443
-  to_port                      = 443
-  ip_protocol                  = "TCP"
-  referenced_security_group_id = aws_security_group.node_security_group.id
-  security_group_id            = aws_eks_cluster.demo_eks.vpc_config[0].cluster_security_group_id
-}
-
-resource "aws_vpc_security_group_egress_rule" "control_plane_egress_to_node_security_group" {
-  description                  = "Allow the cluster control plane to communicate with worker Kubelet and pods"
-  referenced_security_group_id = aws_security_group.node_security_group.id
-  security_group_id            = aws_eks_cluster.demo_eks.vpc_config[0].cluster_security_group_id
-  from_port                    = 1025
-  to_port                      = 65535
-  ip_protocol                  = "TCP"
-}
-
-resource "aws_vpc_security_group_egress_rule" "control_plane_egress_to_node_security_group_on_443" {
-  description                  = "Allow the cluster control plane to communicate with pods running extension API servers on port 443"
-  referenced_security_group_id = aws_security_group.node_security_group.id
-  security_group_id            = aws_eks_cluster.demo_eks.vpc_config[0].cluster_security_group_id
-  from_port                    = 443
-  to_port                      = 443
-  ip_protocol                  = "TCP"
-}
-
-# Launch Template defines how the autoscaling group will create worker nodes.
-resource "aws_launch_template" "node_launch_template" {
-  name = "NodeLaunchTemplate"
-  block_device_mappings {
-    device_name = "/dev/xvda"
-    ebs {
-      delete_on_termination = true
-      volume_size           = 30
-      volume_type           = "gp2"
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.0"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.0"
+    }
+    tls = {
+      source  = "hashicorp/tls"
+      version = "~> 4.0"
+    }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.0"
+    }
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.0"
+    }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.9"
+    }
+    acme = {
+      source  = "vancluever/acme"
+      version = "~> 2.48.0"
     }
   }
 
-  iam_instance_profile {
-    name = aws_iam_instance_profile.node_instance_profile.name
+  # Partial backend — bucket/key/region injected at terraform init via -backend-config
+  # so this module works in any AWS account without code changes.
+  backend "s3" {}
+}
+
+variable "aws_region" {
+  type    = string
+  default = "us-east-1"
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+provider "acme" {
+  server_url = "https://acme-v02.api.letsencrypt.org/directory"
+}
+
+provider "kubernetes" {
+  host                   = aws_eks_cluster.demo_eks.endpoint
+  cluster_ca_certificate = base64decode(aws_eks_cluster.demo_eks.certificate_authority[0].data)
+
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args = [
+      "eks",
+      "get-token",
+      "--cluster-name",
+      aws_eks_cluster.demo_eks.name,
+      "--region",
+      var.aws_region,
+    ]
   }
+}
 
-  key_name      = aws_key_pair.eks_kp.key_name
-  instance_type = "t3.medium"
-  vpc_security_group_ids = [
-    aws_security_group.node_security_group.id
-  ]
+provider "helm" {
+  kubernetes {
+    host                   = aws_eks_cluster.demo_eks.endpoint
+    cluster_ca_certificate = base64decode(aws_eks_cluster.demo_eks.certificate_authority[0].data)
 
-  tags = {
-    "Name" = "NodeLaunchTemplate"
-  }
-
-  image_id = data.aws_ssm_parameter.node_ami.value
-
-  metadata_options {
-    http_put_response_hop_limit = 2
-    http_endpoint               = "enabled"
-    http_tokens                 = "optional"
-  }
-
-  tag_specifications {
-    resource_type = "instance"
-
-    tags = {
-      Name = "worker-node"
+    exec {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      command     = "aws"
+      args = [
+        "eks",
+        "get-token",
+        "--cluster-name",
+        aws_eks_cluster.demo_eks.name,
+        "--region",
+        var.aws_region,
+      ]
     }
   }
-
-  user_data = base64encode(<<EOF
-    #!/bin/bash
-    set -o xtrace
-    /etc/eks/bootstrap.sh ${var.cluster_name}
-    /opt/aws/bin/cfn-signal --exit-code $? \
-                --stack  ${var.cluster_name}-stack \
-                --resource NodeGroup  \
-                --region ${var.aws_region}
-    EOF
-  )
 }
 
+####################################################################
+# Outputs
+####################################################################
 
-# Wait for LT to settle, or CloudFormation may fail
-resource "time_sleep" "wait_30_seconds" {
-  depends_on = [
-    aws_launch_template.node_launch_template
-  ]
-
-  create_duration = "30s"
+output "cluster_name" {
+  value       = aws_eks_cluster.demo_eks.name
+  description = "EKS cluster name"
 }
 
-# Defer to CloudFormation here to create AutoScalingGroup
-# as the terraform ASG resource does not support UpdatePolicy
-resource "aws_cloudformation_stack" "autoscaling_group" {
-  depends_on = [
-    time_sleep.wait_30_seconds
-  ]
-  name          = "eks-cluster-stack"
-  template_body = <<EOF
-Description: "Node autoscaler"
-Resources:
-  NodeGroup:
-    Type: AWS::AutoScaling::AutoScalingGroup
-    Properties:
-      VPCZoneIdentifier: ["${data.aws_subnets.public.ids[0]}","${data.aws_subnets.public.ids[1]}", "${data.aws_subnets.public.ids[2]}"]
-      MinSize: "${var.node_group_min_size}"
-      MaxSize: "${var.node_group_max_size}"
-      DesiredCapacity: "${var.node_group_desired_capacity}"
-      HealthCheckType: EC2
-      LaunchTemplate:
-        LaunchTemplateId: "${aws_launch_template.node_launch_template.id}"
-        Version: "${aws_launch_template.node_launch_template.latest_version}"
-    UpdatePolicy:
-    # Ignore differences in group size properties caused by scheduled actions
-      AutoScalingScheduledAction:
-        IgnoreUnmodifiedGroupSizeProperties: true
-      AutoScalingRollingUpdate:
-        MaxBatchSize: 1
-        MinInstancesInService: "${var.node_group_desired_capacity}"
-        PauseTime: PT5M
-Outputs:
-  NodeAutoScalingGroup:
-    Description: The autoscaling group
-    Value: !Ref NodeGroup
-  EOF
+output "cluster_endpoint" {
+  value       = aws_eks_cluster.demo_eks.endpoint
+  description = "EKS cluster API endpoint"
+}
+
+output "NodeInstanceRole" {
+  value = aws_iam_role.node_instance_role.arn
+}
+
+output "NodeSecurityGroup" {
+  value = aws_security_group.node_security_group.id
+}
+
+output "NodeAutoScalingGroup" {
+  value = aws_cloudformation_stack.autoscaling_group.outputs["NodeAutoScalingGroup"]
+}
+
+output "oidc_provider_arn" {
+  value       = aws_iam_openid_connect_provider.eks.arn
+  description = "OIDC provider ARN used for IRSA"
+}
+
+output "alb_controller_role_arn" {
+  value       = aws_iam_role.alb_controller.arn
+  description = "IAM role ARN used by aws-load-balancer-controller"
+}
+
+output "kubeconfig_command" {
+  value       = "aws eks update-kubeconfig --region ${var.aws_region} --name ${aws_eks_cluster.demo_eks.name}"
+  description = "Run this to point kubectl at the new cluster"
 }

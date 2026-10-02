@@ -133,6 +133,11 @@ output "alb_controller_role_arn" {
   description = "IAM role ARN used by aws-load-balancer-controller"
 }
 
+output "cluster_autoscaler_role_arn" {
+  value       = aws_iam_role.cluster_autoscaler.arn
+  description = "IAM role ARN used by cluster-autoscaler"
+}
+
 output "kubeconfig_command" {
   value       = "aws eks update-kubeconfig --region ${var.aws_region} --name ${aws_eks_cluster.demo_eks.name}"
   description = "Run this to point kubectl at the new cluster"
