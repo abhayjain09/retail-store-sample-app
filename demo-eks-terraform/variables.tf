@@ -1,90 +1,100 @@
-variable "aws_region" {
-  type        = string
-  description = "AWS region to deploy into"
-  default     = "us-east-1"
-}
+####################################################################
+#
+# Variables used. All have defaults
+#
+####################################################################
 
-variable "environment" {
-  type        = string
-  description = "Deployment environment label (used in tags)"
-  default     = "production"
-}
-
+# KK Playground. Cluster must be called 'demo-eks'
 variable "cluster_name" {
   type        = string
-  description = "Name of the EKS cluster"
-  default     = "retail-store-eks"
+  description = "Name of the cluster"
+  default     = "demo-eks"
 }
 
+# KK Playground. Cluster role must be called 'eksClusterRole'
 variable "cluster_role_name" {
   type        = string
-  description = "Name of the EKS cluster IAM role"
-  default     = "retailStoreEksClusterRole"
+  description = "Name of the cluster role"
+  default     = "eksClusterRole"
 }
 
+# In KK playground and for some EKS labs, the role is not predefined.
+# In some other EKS labs, the service role exists already.
+# This variable is initialized as an environment variable source
+# by check-environment.sh if it is required to be "true"
+variable "use_predefined_role" {
+  type        = bool
+  description = "Whether to use predefined cluster service role, or create one."
+  default     = false
+}
+
+# KK Playground. Node role must be called 'eksWorkerNodeRole'
 variable "node_role_name" {
   type        = string
-  description = "Name of the EKS worker node IAM role"
-  default     = "retailStoreEksWorkerNodeRole"
+  description = "Name of node role"
+  default     = "eksWorkerNodeRole"
 }
 
+# KK Playground. Policy role must be called 'eksPolicy'
 variable "additional_policy_name" {
   type        = string
-  description = "Name of the additional IAM policy attached to node and cluster roles"
-  default     = "retailStoreEksPolicy"
+  description = "Name of IAM::Policy created for additional permissions"
+  default     = "eksPolicy"
 }
 
+# KodeKloud sandbox caps the account at 10 vCPU / 20 GiB total. With the
+# default t3.medium worker (2 vCPU, 4 GiB), max=3 keeps cluster usage at
+# 6 vCPU / 12 GiB, leaving 4 vCPU / 8 GiB headroom for any KodeKloud-managed
+# instances. Re-verify the sandbox's actual headroom before raising this
+# further or changing instance type.
 variable "node_group_desired_capacity" {
   type        = number
-  description = "Desired number of worker nodes"
-  default     = 3
+  description = "Desired capacity of Node Group ASG."
+  default     = 2
 }
-
 variable "node_group_max_size" {
   type        = number
-  description = "Maximum number of worker nodes"
-  default     = 4
+  description = "Maximum size of Node Group ASG. Raised to 3 for autoscaling headroom; stay under the 10 vCPU sandbox limit."
+  default     = 3
 }
 
 variable "node_group_min_size" {
   type        = number
-  description = "Minimum number of worker nodes"
+  description = "Minimum size of Node Group ASG."
   default     = 1
 }
 
-variable "node_instance_type" {
+variable "root_domain" {
   type        = string
-  description = "EC2 instance type for worker nodes"
-  default     = "t3.medium"
+  description = "DuckDNS root domain used for the application URL."
+  default     = "duckdns.org"
+
+  validation {
+    condition     = lower(trim(var.root_domain, ".")) == "duckdns.org"
+    error_message = "root_domain must be duckdns.org when using the DuckDNS ACME integration."
+  }
 }
 
-variable "image_tag" {
+variable "app_subdomain" {
   type        = string
-  description = "Docker image tag to deploy for all services"
-  default     = "latest"
+  description = "DuckDNS subdomain to use for the retail store UI."
+  default     = "abhayshreya"
+
+  validation {
+    condition     = can(regex("^[a-z0-9-]+$", lower(var.app_subdomain)))
+    error_message = "app_subdomain must contain only lowercase letters, numbers, and hyphens."
+  }
 }
 
-variable "alb_controller_chart_version" {
+variable "cognito_domain_prefix" {
   type        = string
-  description = "Helm chart version for aws-load-balancer-controller"
-  default     = "1.8.1"
-}
-
-variable "github_org" {
-  type        = string
-  description = "GitHub organisation or user that owns the repository (used for OIDC trust)"
-  default     = "abhay09jain"
-}
-
-variable "github_repo" {
-  type        = string
-  description = "GitHub repository name (used for OIDC trust)"
-  default     = "retail-store-sample-app"
+  description = "Optional Cognito managed login domain prefix. Leave empty to derive one automatically."
+  default     = ""
 }
 
 variable "openai_api_key" {
   type        = string
-  description = "OpenAI API key; when set, enables the AI chat feature in the UI service"
+  description = "Optional OpenAI-compatible API key used by the retail store chat feature."
   default     = ""
   sensitive   = true
 }
