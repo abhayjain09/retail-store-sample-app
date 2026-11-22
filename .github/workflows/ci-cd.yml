@@ -14,7 +14,15 @@ name: CI/CD — End-to-End Deployment
 #       └─► create-ecr       (AWS CLI — idempotent ECR repo creation)
 #               ├─► build-services      (parallel — 5 app images)
 #               └─► mirror-dependencies (parallel — 5 dependency images)
-#                       └─► terraform  (EKS cluster + Helm/kubectl app deploy)
+#                       └─► terraform  (EKS cluster + add-ons + Helm/kubectl app deploy)
+#
+# EKS add-ons (demo-eks-terraform/addons.tf) — installed and verified every apply:
+#   vpc-cni, kube-proxy, eks-pod-identity-agent, eks-node-monitoring-agent,
+#   amazon-cloudwatch-observability, fluent-bit (→ CloudWatch Logs), with IRSA roles.
+#   Add-ons created outside Terraform (e.g. via the console) are adopted into
+#   state automatically before plan.
+#   Repository variable FLUENT_BIT_CLOUDWATCH_ENABLED=false turns off the
+#   fluent-bit CloudWatch output (CloudWatch add-on log collection takes over).
 # ─────────────────────────────────────────────────────────────────────────────
 on:
   workflow_dispatch:
@@ -348,6 +356,15 @@ jobs:
       DUCKDNS_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || inputs.openai_api_key }}
       TF_VAR_openai_api_key: ${{ secrets.OPENAI_API_KEY || inputs.openai_api_key }}
+      # Same values as the explicit -var flags below; set as env too so that
+      # `terraform import` (add-on adoption step) sees an identical config.
+      TF_VAR_aws_region:          ${{ inputs.aws_region }}
+      TF_VAR_cluster_name:        ${{ needs.bootstrap.outputs.cluster_name }}
+      TF_VAR_root_domain:         ${{ inputs.root_domain }}
+      TF_VAR_app_subdomain:       ${{ inputs.app_subdomain }}
+      TF_VAR_use_predefined_role: ${{ needs.bootstrap.outputs.use_predefined_role }}
+      # fluent-bit → CloudWatch Logs (repository variable; default on)
+      TF_VAR_fluent_bit_cloudwatch_enabled: ${{ vars.FLUENT_BIT_CLOUDWATCH_ENABLED || 'true' }}
     needs:
       - resolve-tag
       - bootstrap
@@ -436,6 +453,61 @@ jobs:
       - name: Terraform Validate
         working-directory: ${{ env.TF_DIR }}
         run: terraform validate
+
+      # EKS add-ons that already exist on the cluster but not in Terraform state
+      # (e.g. installed from the console) would make CreateAddon fail with
+      # "already exists". Import them so Terraform takes ownership and fixes
+      # their config/IRSA role; add-ons stuck in a *_FAILED state are deleted
+      # so Terraform can create them cleanly.
+      - name: Adopt EKS add-ons created outside Terraform
+        if: ${{ inputs.action != 'destroy' }}
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          CLUSTER="${{ needs.bootstrap.outputs.cluster_name }}"
+          REGION="${{ inputs.aws_region }}"
+
+          if ! aws eks describe-cluster --name "$CLUSTER" --region "$REGION" >/dev/null 2>&1; then
+            echo "Cluster $CLUSTER does not exist yet — nothing to adopt."
+            exit 0
+          fi
+
+          STATE=$(terraform state list 2>/dev/null || true)
+
+          declare -A ADDONS=(
+            [vpc-cni]=vpc_cni
+            [kube-proxy]=kube_proxy
+            [eks-pod-identity-agent]=pod_identity_agent
+            [eks-node-monitoring-agent]=node_monitoring_agent
+            [amazon-cloudwatch-observability]=cloudwatch_observability
+            [fluent-bit]=fluent_bit
+          )
+
+          for NAME in "${!ADDONS[@]}"; do
+            ADDR="aws_eks_addon.${ADDONS[$NAME]}"
+
+            if grep -qx "$ADDR" <<<"$STATE"; then
+              echo "✓ $NAME already managed by Terraform"
+              continue
+            fi
+
+            STATUS=$(aws eks describe-addon --cluster-name "$CLUSTER" --addon-name "$NAME" \
+              --region "$REGION" --query 'addon.status' --output text 2>/dev/null || echo "NONE")
+
+            case "$STATUS" in
+              NONE)
+                echo "• $NAME not installed — Terraform will create it"
+                ;;
+              CREATE_FAILED|DELETE_FAILED)
+                echo "✗ $NAME is $STATUS — deleting so Terraform can recreate it"
+                aws eks delete-addon --cluster-name "$CLUSTER" --addon-name "$NAME" --region "$REGION" >/dev/null
+                aws eks wait addon-deleted --cluster-name "$CLUSTER" --addon-name "$NAME" --region "$REGION"
+                ;;
+              *)
+                echo "→ $NAME exists ($STATUS) outside Terraform — importing into $ADDR"
+                terraform import -input=false "$ADDR" "${CLUSTER}:${NAME}"
+                ;;
+            esac
+          done
 
       # All vars passed explicitly — no defaults relied on from variables.tf
       - name: Terraform Plan
@@ -606,3 +678,90 @@ jobs:
           echo "| Cognito Login Domain | ${COGNITO_LOGIN_DOMAIN} |" >> $GITHUB_STEP_SUMMARY
           echo "| Current ALB IP in DuckDNS | ${CURRENT_IP} |" >> $GITHUB_STEP_SUMMARY
           echo "| DuckDNS Sync | Kubernetes CronJob every 5 minutes |" >> $GITHUB_STEP_SUMMARY
+
+      # ── EKS add-on health ────────────────────────────────────────────────
+      # Runs last so a slow add-on never blocks the app deploy / DuckDNS steps,
+      # but still fails the run if any add-on is not healthy.
+      - name: Verify EKS add-ons
+        if: ${{ inputs.action == 'apply' }}
+        run: |
+          CLUSTER="${{ needs.bootstrap.outputs.cluster_name }}"
+          REGION="${{ inputs.aws_region }}"
+          ADDONS="vpc-cni kube-proxy eks-pod-identity-agent eks-node-monitoring-agent amazon-cloudwatch-observability fluent-bit"
+
+          # Wait up to 10 minutes for every add-on to report ACTIVE
+          for attempt in $(seq 1 60); do
+            PENDING=""
+            for NAME in $ADDONS; do
+              STATUS=$(aws eks describe-addon --cluster-name "$CLUSTER" --addon-name "$NAME" \
+                --region "$REGION" --query 'addon.status' --output text 2>/dev/null || echo "MISSING")
+              [ "$STATUS" = "ACTIVE" ] || PENDING="$PENDING $NAME($STATUS)"
+            done
+            [ -z "$PENDING" ] && break
+            echo "Waiting for add-ons ($attempt/60):$PENDING"
+            sleep 10
+          done
+
+          FAILED=0
+          echo "### EKS Add-ons" >> $GITHUB_STEP_SUMMARY
+          echo "| Add-on | Version | Status | IRSA role | Health issues |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|---|---|---|" >> $GITHUB_STEP_SUMMARY
+          for NAME in $ADDONS; do
+            read -r STATUS VERSION ROLE <<<"$(aws eks describe-addon --cluster-name "$CLUSTER" --addon-name "$NAME" \
+              --region "$REGION" --query 'addon.[status,addonVersion,serviceAccountRoleArn]' --output text 2>/dev/null || echo "MISSING - -")"
+            ISSUES=$(aws eks describe-addon --cluster-name "$CLUSTER" --addon-name "$NAME" --region "$REGION" \
+              --query 'addon.health.issues[].[code,message]' --output text 2>/dev/null | tr '\t\n' ': ' || true)
+            echo "| $NAME | $VERSION | $STATUS | ${ROLE##*/} | ${ISSUES:-none} |" >> $GITHUB_STEP_SUMMARY
+            echo "$NAME: $STATUS $VERSION ${ISSUES}"
+            [ "$STATUS" = "ACTIVE" ] || FAILED=1
+          done
+
+          echo "--- Add-on workloads ---"
+          kubectl get daemonsets -n kube-system
+          kubectl get pods -n amazon-cloudwatch -o wide || true
+          kubectl get pods -n fluent-bit -o wide || true
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "One or more EKS add-ons are not ACTIVE — see the table in the run summary."
+            exit 1
+          fi
+
+      - name: Verify fluent-bit → CloudWatch Logs
+        if: ${{ inputs.action == 'apply' && env.TF_VAR_fluent_bit_cloudwatch_enabled == 'true' }}
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          REGION="${{ inputs.aws_region }}"
+          APP_GROUP=$(terraform output -json fluent_bit_log_groups | jq -r '.[0] // empty')
+          if [ -z "$APP_GROUP" ]; then
+            echo "fluent-bit CloudWatch output disabled — nothing to verify."
+            exit 0
+          fi
+
+          DS=$(kubectl get daemonset -n fluent-bit -o name | head -1)
+          if [ -z "$DS" ]; then
+            echo "No fluent-bit DaemonSet found in namespace fluent-bit"
+            exit 1
+          fi
+          kubectl rollout status "$DS" -n fluent-bit --timeout=5m
+
+          # fluent-bit creates the log group on the first shipped log line
+          for attempt in $(seq 1 30); do
+            FOUND=$(aws logs describe-log-groups --region "$REGION" \
+              --log-group-name-prefix "$APP_GROUP" \
+              --query "logGroups[?logGroupName=='${APP_GROUP}'].logGroupName" --output text)
+            if [ "$FOUND" = "$APP_GROUP" ]; then
+              STREAMS=$(aws logs describe-log-streams --region "$REGION" --log-group-name "$APP_GROUP" \
+                --query 'length(logStreams)' --output text)
+              echo "✓ $APP_GROUP exists with $STREAMS log stream(s)"
+              echo "### fluent-bit → CloudWatch Logs" >> $GITHUB_STEP_SUMMARY
+              echo "Log group \`$APP_GROUP\` receiving logs ($STREAMS streams)" >> $GITHUB_STEP_SUMMARY
+              exit 0
+            fi
+            echo "Waiting for $APP_GROUP ($attempt/30)..."
+            sleep 10
+          done
+
+          echo "Log group $APP_GROUP was not created within 5 minutes. fluent-bit logs:"
+          kubectl logs "$DS" -n fluent-bit --tail=100 || true
+          echo "If the add-on rejected the output config, set repository variable FLUENT_BIT_CLOUDWATCH_ENABLED=false and re-run."
+          exit 1

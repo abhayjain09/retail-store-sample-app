@@ -45,6 +45,37 @@ output "alb_controller_role_arn" {
   description = "IAM role ARN used by aws-load-balancer-controller"
 }
 
+output "eks_addon_versions" {
+  value = {
+    for a in [
+      aws_eks_addon.vpc_cni,
+      aws_eks_addon.kube_proxy,
+      aws_eks_addon.pod_identity_agent,
+      aws_eks_addon.node_monitoring_agent,
+      aws_eks_addon.cloudwatch_observability,
+      aws_eks_addon.fluent_bit,
+    ] : a.addon_name => a.addon_version
+  }
+  description = "Installed EKS add-ons and their versions"
+}
+
+output "addon_irsa_role_arns" {
+  value = {
+    vpc_cni                  = aws_iam_role.vpc_cni.arn
+    cloudwatch_observability = aws_iam_role.cloudwatch_observability.arn
+    fluent_bit               = aws_iam_role.fluent_bit.arn
+  }
+  description = "IRSA role ARNs used by EKS add-ons"
+}
+
+output "fluent_bit_log_groups" {
+  value = var.fluent_bit_cloudwatch_enabled ? [
+    "${local.fluent_bit_log_group_prefix}/application",
+    "${local.fluent_bit_log_group_prefix}/host",
+  ] : []
+  description = "CloudWatch log groups fluent-bit writes to (created on first log line)"
+}
+
 output "github_actions_role_arn" {
   value       = aws_iam_role.github_actions.arn
   description = "IAM role ARN assumed by GitHub Actions via OIDC"
