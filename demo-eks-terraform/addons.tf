@@ -12,8 +12,11 @@
 #  fluent-bit (community)           observability  IRSA  fluent-bit/fluent-bit
 #
 # All IRSA roles trust the cluster OIDC provider created in alb-controller.tf.
-# Permissions use managed policies + attachments only: iam:PutRolePolicy
-# (inline policies) is denied for this lab's IAM user.
+# Lab IAM user restrictions shape this file:
+#   - iam:PutRolePolicy denied → managed policies + attachments only
+#   - iam:PassRole denied      → no service_account_role_arn on add-ons; roles
+#                                are bound by annotating the service accounts
+#                                (see "IRSA binding" below)
 #
 # Add-ons wait for the worker nodes to join (aws-auth + ASG) so every
 # DaemonSet can schedule and the add-on reaches ACTIVE in the same apply.
@@ -248,7 +251,6 @@ resource "aws_eks_addon" "vpc_cni" {
   cluster_name                = aws_eks_cluster.demo_eks.name
   addon_name                  = "vpc-cni"
   addon_version               = local.addon_version["vpc-cni"]
-  service_account_role_arn    = aws_iam_role.vpc_cni.arn
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
   preserve                    = true
@@ -300,7 +302,6 @@ resource "aws_eks_addon" "cloudwatch_observability" {
   cluster_name                = aws_eks_cluster.demo_eks.name
   addon_name                  = "amazon-cloudwatch-observability"
   addon_version               = local.addon_version["amazon-cloudwatch-observability"]
-  service_account_role_arn    = aws_iam_role.cloudwatch_observability.arn
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
 
@@ -325,7 +326,6 @@ resource "aws_eks_addon" "fluent_bit" {
   cluster_name                = aws_eks_cluster.demo_eks.name
   addon_name                  = "fluent-bit"
   addon_version               = local.addon_version["fluent-bit"]
-  service_account_role_arn    = var.fluent_bit_use_irsa ? aws_iam_role.fluent_bit.arn : null
   configuration_values        = local.fluent_bit_configuration_values
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
@@ -339,6 +339,89 @@ resource "aws_eks_addon" "fluent_bit" {
     aws_iam_role_policy_attachment.fluent_bit_logs,
     aws_eks_addon.vpc_cni,
   ]
+}
+
+# ---- IRSA binding: annotate add-on service accounts ----
+#
+# The add-ons are created WITHOUT service_account_role_arn: EKS requires
+# iam:PassRole for that, which this lab's IAM user does not have. Instead the
+# role is bound the same way as aws-load-balancer-controller and
+# cluster-autoscaler: an eks.amazonaws.com/role-arn annotation on the service
+# account (no PassRole needed). EKS add-on reconciliation leaves annotations it
+# does not manage in place.
+
+locals {
+  addon_irsa_role_arns = {
+    vpc_cni    = aws_iam_role.vpc_cni.arn
+    cloudwatch = aws_iam_role.cloudwatch_observability.arn
+    fluent_bit = aws_iam_role.fluent_bit.arn
+  }
+
+  addon_irsa_bindings = {
+    for k, v in local.addon_irsa_service_accounts : k => merge(v, { role_arn = local.addon_irsa_role_arns[k] })
+    if k != "fluent_bit" || var.fluent_bit_use_irsa
+  }
+}
+
+resource "kubernetes_annotations" "addon_irsa" {
+  for_each = local.addon_irsa_bindings
+
+  api_version = "v1"
+  kind        = "ServiceAccount"
+  force       = true
+
+  metadata {
+    name      = each.value.service_account
+    namespace = each.value.namespace
+  }
+
+  annotations = {
+    "eks.amazonaws.com/role-arn" = each.value.role_arn
+  }
+
+  depends_on = [
+    aws_eks_addon.vpc_cni,
+    aws_eks_addon.cloudwatch_observability,
+    aws_eks_addon.fluent_bit,
+  ]
+}
+
+# Pods only receive IRSA credentials when they are created, so restart the
+# DaemonSets/Deployments using each annotated service account whenever its
+# role binding changes (first apply, or role change).
+resource "null_resource" "addon_irsa_restart" {
+  for_each = local.addon_irsa_bindings
+
+  triggers = {
+    role_arn        = kubernetes_annotations.addon_irsa[each.key].annotations["eks.amazonaws.com/role-arn"]
+    namespace       = each.value.namespace
+    service_account = each.value.service_account
+    cluster_name    = aws_eks_cluster.demo_eks.name
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -e
+      aws eks update-kubeconfig --region ${var.aws_region} --name ${aws_eks_cluster.demo_eks.name} >/dev/null
+
+      workloads=$(kubectl get daemonsets,deployments -n ${each.value.namespace} -o json \
+        | jq -r --arg sa "${each.value.service_account}" \
+          '.items[] | select(.spec.template.spec.serviceAccountName == $sa) | "\(.kind | ascii_downcase)/\(.metadata.name)"')
+
+      if [ -z "$workloads" ]; then
+        echo "No workloads use ${each.value.namespace}/${each.value.service_account} yet - nothing to restart"
+        exit 0
+      fi
+
+      for w in $workloads; do
+        echo "Restarting $w in ${each.value.namespace} to pick up IRSA role"
+        kubectl rollout restart "$w" -n ${each.value.namespace}
+      done
+      for w in $workloads; do
+        kubectl rollout status "$w" -n ${each.value.namespace} --timeout=10m
+      done
+    EOT
+  }
 }
 
 # ---- Outputs ----

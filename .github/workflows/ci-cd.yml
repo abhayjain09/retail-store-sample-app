@@ -706,9 +706,29 @@ jobs:
           echo "### EKS Add-ons" >> $GITHUB_STEP_SUMMARY
           echo "| Add-on | Version | Status | IRSA role | Health issues |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|---|---|---|" >> $GITHUB_STEP_SUMMARY
+          # IRSA roles are bound via service-account annotations (lab user has no
+          # iam:PassRole, so add-ons carry no serviceAccountRoleArn)
+          declare -A IRSA_SA=(
+            [vpc-cni]=kube-system/aws-node
+            [amazon-cloudwatch-observability]=amazon-cloudwatch/cloudwatch-agent
+            [fluent-bit]=fluent-bit/fluent-bit
+          )
+
           for NAME in $ADDONS; do
-            read -r STATUS VERSION ROLE <<<"$(aws eks describe-addon --cluster-name "$CLUSTER" --addon-name "$NAME" \
-              --region "$REGION" --query 'addon.[status,addonVersion,serviceAccountRoleArn]' --output text 2>/dev/null || echo "MISSING - -")"
+            read -r STATUS VERSION <<<"$(aws eks describe-addon --cluster-name "$CLUSTER" --addon-name "$NAME" \
+              --region "$REGION" --query 'addon.[status,addonVersion]' --output text 2>/dev/null || echo "MISSING -")"
+            ROLE="none"
+            if [ -n "${IRSA_SA[$NAME]:-}" ]; then
+              SA_NS="${IRSA_SA[$NAME]%%/*}"
+              SA_NAME="${IRSA_SA[$NAME]##*/}"
+              ROLE=$(kubectl get serviceaccount "$SA_NAME" -n "$SA_NS" \
+                -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null || true)
+              if [ -z "$ROLE" ]; then
+                echo "✗ $NAME: service account $SA_NS/$SA_NAME has no IRSA role annotation"
+                ROLE="MISSING"
+                FAILED=1
+              fi
+            fi
             ISSUES=$(aws eks describe-addon --cluster-name "$CLUSTER" --addon-name "$NAME" --region "$REGION" \
               --query 'addon.health.issues[].[code,message]' --output text 2>/dev/null | tr '\t\n' ': ' || true)
             echo "| $NAME | $VERSION | $STATUS | ${ROLE##*/} | ${ISSUES:-none} |" >> $GITHUB_STEP_SUMMARY
