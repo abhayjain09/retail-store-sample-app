@@ -49,13 +49,22 @@ variable "additional_policy_name" {
 # further or changing instance type.
 variable "node_group_desired_capacity" {
   type        = number
-  description = "Desired capacity of Node Group ASG."
-  default     = 2
+  description = "Desired capacity of Node Group ASG. 3 x t3.medium = 6 vCPU, within the 10 vCPU sandbox limit."
+  default     = 3
 }
 variable "node_group_max_size" {
   type        = number
   description = "Maximum size of Node Group ASG. Raised to 3 for autoscaling headroom; stay under the 10 vCPU sandbox limit."
   default     = 3
+}
+
+# With VPC CNI prefix delegation (addons.tf) the ENI-based limit (17 pods on a
+# t3.medium) no longer applies; 110 is the AWS-recommended max for nodes with
+# fewer than 30 vCPUs. CPU/memory requests remain the real per-node limit.
+variable "node_max_pods" {
+  type        = number
+  description = "kubelet --max-pods for worker nodes (requires VPC CNI prefix delegation)"
+  default     = 110
 }
 
 variable "node_group_min_size" {

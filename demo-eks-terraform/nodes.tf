@@ -209,7 +209,9 @@ resource "aws_launch_template" "node_launch_template" {
   user_data = base64encode(<<EOF
     #!/bin/bash
     set -o xtrace
-    /etc/eks/bootstrap.sh ${var.cluster_name}
+    /etc/eks/bootstrap.sh ${var.cluster_name} \
+                --use-max-pods false \
+                --kubelet-extra-args '--max-pods=${var.node_max_pods}'
     /opt/aws/bin/cfn-signal --exit-code $? \
                 --stack  ${var.cluster_name}-stack \
                 --resource NodeGroup  \
@@ -265,7 +267,7 @@ Resources:
         IgnoreUnmodifiedGroupSizeProperties: true
       AutoScalingRollingUpdate:
         MaxBatchSize: 1
-        MinInstancesInService: "${var.node_group_desired_capacity}"
+        MinInstancesInService: "${max(var.node_group_desired_capacity - 1, 1)}"
         PauseTime: PT5M
 Outputs:
   NodeAutoScalingGroup:

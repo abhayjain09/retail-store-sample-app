@@ -255,6 +255,16 @@ resource "aws_eks_addon" "vpc_cni" {
   resolve_conflicts_on_update = "OVERWRITE"
   preserve                    = true
 
+  # Prefix delegation: each ENI slot gets a /28 (16 IPs) instead of one IP, so
+  # a t3.medium is no longer capped at 17 pods. Paired with kubelet
+  # --max-pods=var.node_max_pods in the node user data (nodes.tf).
+  configuration_values = jsonencode({
+    env = {
+      ENABLE_PREFIX_DELEGATION = "true"
+      WARM_PREFIX_TARGET       = "1"
+    }
+  })
+
   depends_on = [
     aws_iam_role_policy_attachment.vpc_cni,
     kubernetes_config_map.aws_auth,
@@ -363,65 +373,75 @@ locals {
   }
 }
 
-resource "kubernetes_annotations" "addon_irsa" {
-  for_each = local.addon_irsa_bindings
-
-  api_version = "v1"
-  kind        = "ServiceAccount"
-  force       = true
-
-  metadata {
-    name      = each.value.service_account
-    namespace = each.value.namespace
-  }
-
-  annotations = {
-    "eks.amazonaws.com/role-arn" = each.value.role_arn
-  }
-
-  depends_on = [
-    aws_eks_addon.vpc_cni,
-    aws_eks_addon.cloudwatch_observability,
-    aws_eks_addon.fluent_bit,
-  ]
-}
-
-# Pods only receive IRSA credentials when they are created, so restart the
-# DaemonSets/Deployments using each annotated service account whenever its
-# role binding changes (first apply, or role change).
-resource "null_resource" "addon_irsa_restart" {
+# This runs IN PARALLEL with the add-on installs (it depends only on vpc-cni,
+# like the add-ons themselves), not after them: an add-on whose pods need AWS
+# credentials to become Ready (fluent-bit) never reaches ACTIVE without the
+# role, so waiting for ACTIVE first would deadlock. It waits for the add-on to
+# create its service account, annotates it, then restarts the workloads using
+# it - pods only receive IRSA credentials when they are created.
+resource "null_resource" "addon_irsa" {
   for_each = local.addon_irsa_bindings
 
   triggers = {
-    role_arn        = kubernetes_annotations.addon_irsa[each.key].annotations["eks.amazonaws.com/role-arn"]
+    role_arn        = each.value.role_arn
     namespace       = each.value.namespace
     service_account = each.value.service_account
     cluster_name    = aws_eks_cluster.demo_eks.name
+    vpc_cni_addon   = aws_eks_addon.vpc_cni.id
   }
 
   provisioner "local-exec" {
     command = <<-EOT
       set -e
+      NS="${each.value.namespace}"
+      SA="${each.value.service_account}"
       aws eks update-kubeconfig --region ${var.aws_region} --name ${aws_eks_cluster.demo_eks.name} >/dev/null
 
-      workloads=$(kubectl get daemonsets,deployments -n ${each.value.namespace} -o json \
-        | jq -r --arg sa "${each.value.service_account}" \
-          '.items[] | select(.spec.template.spec.serviceAccountName == $sa) | "\(.kind | ascii_downcase)/\(.metadata.name)"')
+      # 1. Wait (up to 20 min) for the add-on to create the service account
+      for i in $(seq 1 120); do
+        kubectl get serviceaccount "$SA" -n "$NS" >/dev/null 2>&1 && break
+        echo "Waiting for service account $NS/$SA ($i/120)..."
+        sleep 10
+      done
+      kubectl get serviceaccount "$SA" -n "$NS" >/dev/null
+
+      # 2. Bind the IRSA role
+      kubectl annotate serviceaccount "$SA" -n "$NS" --overwrite \
+        "eks.amazonaws.com/role-arn=${each.value.role_arn}"
+      echo "Annotated $NS/$SA with ${each.value.role_arn}"
+
+      # 3. Wait (up to 10 min) for workloads using the service account, then restart them
+      workloads=""
+      for i in $(seq 1 60); do
+        workloads=$(kubectl get daemonsets,deployments -n "$NS" -o json \
+          | jq -r --arg sa "$SA" \
+            '.items[] | select(.spec.template.spec.serviceAccountName == $sa) | "\(.kind | ascii_downcase)/\(.metadata.name)"')
+        [ -n "$workloads" ] && break
+        echo "Waiting for workloads using $NS/$SA ($i/60)..."
+        sleep 10
+      done
 
       if [ -z "$workloads" ]; then
-        echo "No workloads use ${each.value.namespace}/${each.value.service_account} yet - nothing to restart"
+        echo "WARNING: no workloads use $NS/$SA - nothing to restart"
         exit 0
       fi
 
       for w in $workloads; do
-        echo "Restarting $w in ${each.value.namespace} to pick up IRSA role"
-        kubectl rollout restart "$w" -n ${each.value.namespace}
+        echo "Restarting $w in $NS to pick up the IRSA role"
+        kubectl rollout restart "$w" -n "$NS"
       done
       for w in $workloads; do
-        kubectl rollout status "$w" -n ${each.value.namespace} --timeout=10m
+        kubectl rollout status "$w" -n "$NS" --timeout=10m || echo "WARNING: $w not fully rolled out yet (checked again by the pipeline verify step)"
       done
     EOT
   }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.vpc_cni,
+    aws_iam_role_policy_attachment.cloudwatch_agent,
+    aws_iam_role_policy_attachment.cloudwatch_xray,
+    aws_iam_role_policy_attachment.fluent_bit_logs,
+  ]
 }
 
 # ---- Outputs ----
