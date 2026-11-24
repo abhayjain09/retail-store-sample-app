@@ -23,6 +23,13 @@ name: CI/CD — End-to-End Deployment
 #   state automatically before plan.
 #   Repository variable FLUENT_BIT_CLOUDWATCH_ENABLED=false turns off the
 #   fluent-bit CloudWatch output (CloudWatch add-on log collection takes over).
+#
+# App delivery — Helm + Argo CD (demo-eks-terraform/argocd.tf):
+#   Terraform installs Argo CD (Helm chart argo-cd) and an Argo CD Application
+#   that syncs the Helm chart deploy/helm/retail-store from this repo/branch
+#   into the "default" namespace (auto-sync, prune, self-heal). The private
+#   ECR registry and image tag are passed as Helm values by Terraform.
+#   Private repo? Add secret ARGOCD_REPO_TOKEN (read-only PAT for this repo).
 # ─────────────────────────────────────────────────────────────────────────────
 on:
   workflow_dispatch:
@@ -343,6 +350,29 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: terraform validate -no-color
 
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      # Render the chart with the same value shape Terraform passes via Argo CD
+      - name: Helm lint & template retail-store chart
+        run: |
+          CHART=deploy/helm/retail-store
+          cat > ci-values.yaml <<'EOF'
+          image:
+            registry: 000000000000.dkr.ecr.us-east-1.amazonaws.com
+            tag: sha-test
+          ingress:
+            host: example.duckdns.org
+            certificateArn: arn:aws:acm:us-east-1:000000000000:certificate/test
+            cognitoAuthConfig: '{"userPoolARN":"arn","userPoolClientID":"id","userPoolDomain":"d"}'
+          ui:
+            authLogoutUrl: https://example.auth.us-east-1.amazoncognito.com/logout?client_id=x&scope=openid+email
+          EOF
+          helm lint "$CHART" -f ci-values.yaml
+          helm template retail-store "$CHART" -f ci-values.yaml > rendered.yaml
+          echo "Rendered $(grep -c '^kind:' rendered.yaml) objects"
+          grep 'image:' rendered.yaml
+
   # ── 7. Terraform — EKS cluster + deploy app ──────────────────────────────
   # Uses demo-eks-terraform/ (committed in this repo) — no external repo clone needed.
   # Patches retail-store.yaml.tftpl image URLs with private ECR before apply.
@@ -365,6 +395,15 @@ jobs:
       TF_VAR_use_predefined_role: ${{ needs.bootstrap.outputs.use_predefined_role }}
       # fluent-bit → CloudWatch Logs (repository variable; default on)
       TF_VAR_fluent_bit_cloudwatch_enabled: ${{ vars.FLUENT_BIT_CLOUDWATCH_ENABLED || 'true' }}
+      # Argo CD / Helm: images for the retail-store chart and the Git source
+      # Argo CD syncs from (this repo, the branch the pipeline runs on).
+      TF_VAR_image_registry:          ${{ needs.bootstrap.outputs.ecr_registry }}
+      TF_VAR_image_tag:               ${{ needs.resolve-tag.outputs.image_tag }}
+      TF_VAR_gitops_repo_url:         ${{ github.server_url }}/${{ github.repository }}.git
+      TF_VAR_gitops_target_revision:  ${{ github.ref_name }}
+      # Only needed when the repo is private: a fine-grained PAT with
+      # Contents: read-only on this repo, stored as secret ARGOCD_REPO_TOKEN.
+      TF_VAR_gitops_repo_token:       ${{ secrets.ARGOCD_REPO_TOKEN }}
     needs:
       - resolve-tag
       - bootstrap
@@ -402,33 +441,11 @@ jobs:
             exit 1
           fi
 
-      # Replace all public ECR image URLs in retail-store.yaml.tftpl with private ECR.
-      # ECR registry and tag are derived at runtime — nothing hardcoded.
-      - name: Patch retail-store.yaml.tftpl with private ECR images
-        run: |
-          ECR="${{ needs.bootstrap.outputs.ecr_registry }}"
-          TAG="${{ needs.resolve-tag.outputs.image_tag }}"
-          YAML="${{ env.TF_DIR }}/retail-store.yaml.tftpl"
-
-          echo "ECR registry : $ECR"
-          echo "Image tag    : $TAG"
-
-          # Service images (built from source)
-          sed -i "s|public.ecr.aws/aws-containers/retail-store-sample-ui:[^ \"]*|${ECR}/retail-store-sample-ui:${TAG}|g"           "$YAML"
-          sed -i "s|public.ecr.aws/aws-containers/retail-store-sample-catalog:[^ \"]*|${ECR}/retail-store-sample-catalog:${TAG}|g"   "$YAML"
-          sed -i "s|public.ecr.aws/aws-containers/retail-store-sample-cart:[^ \"]*|${ECR}/retail-store-sample-cart:${TAG}|g"         "$YAML"
-          sed -i "s|public.ecr.aws/aws-containers/retail-store-sample-checkout:[^ \"]*|${ECR}/retail-store-sample-checkout:${TAG}|g" "$YAML"
-          sed -i "s|public.ecr.aws/aws-containers/retail-store-sample-orders:[^ \"]*|${ECR}/retail-store-sample-orders:${TAG}|g"     "$YAML"
-
-          # Dependency images (mirrored with fixed tags)
-          sed -i "s|public.ecr.aws/docker/library/mysql:8.0|${ECR}/retail-store-sample-mysql:8.0|g"                                "$YAML"
-          sed -i "s|public.ecr.aws/docker/library/postgres:16.1|${ECR}/retail-store-sample-postgres:16.1|g"                        "$YAML"
-          sed -i "s|public.ecr.aws/docker/library/rabbitmq:3-management|${ECR}/retail-store-sample-rabbitmq:3-management|g"        "$YAML"
-          sed -i "s|public.ecr.aws/aws-dynamodb-local/aws-dynamodb-local:1.25.1|${ECR}/retail-store-sample-dynamodb-local:1.25.1|g" "$YAML"
-          sed -i "s|redis:6.0-alpine|${ECR}/retail-store-sample-redis:6.0-alpine|g"                                                "$YAML"
-
-          echo "--- Patched image lines ---"
-          grep "image:" "$YAML"
+      # Images are no longer patched into a manifest: the private ECR registry and
+      # image tag reach the retail-store Helm chart through the Argo CD Application
+      # (TF_VAR_image_registry / TF_VAR_image_tag above).
+      - name: Install Helm
+        uses: azure/setup-helm@v4
 
       - name: Setup Terraform ${{ env.TF_VERSION }}
         uses: hashicorp/setup-terraform@v3
@@ -482,43 +499,95 @@ jobs:
             [fluent-bit]=fluent_bit
           )
 
-          for NAME in "${!ADDONS[@]}"; do
-            ADDR="aws_eks_addon.${ADDONS[$NAME]}"
+          # A failed add-on (e.g. CREATE_FAILED) is normally deleted and recreated.
+          # The KodeKloud lab user may not have eks:DeleteAddon, so fall back to
+          # retrying the install in place with UpdateAddon, then clear the taint so
+          # Terraform does not try to delete/recreate it.
+          recover_addon() {
+            local NAME="$1" ADDR="$2" IN_STATE="$3"
+            echo "✗ $NAME is $STATUS — trying DeleteAddon so Terraform can recreate it"
+            if aws eks delete-addon --cluster-name "$CLUSTER" --addon-name "$NAME" \
+                 --region "$REGION" >/dev/null 2>delete.err; then
+              aws eks wait addon-deleted --cluster-name "$CLUSTER" --addon-name "$NAME" --region "$REGION"
+              if [ "$IN_STATE" = 1 ]; then terraform state rm "$ADDR"; fi
+              echo "  deleted — Terraform will create it again"
+              return 0
+            fi
+            cat delete.err
 
-            if grep -qx "$ADDR" <<<"$STATE"; then
-              echo "✓ $NAME already managed by Terraform"
-              continue
+            echo "  DeleteAddon not permitted — retrying the install in place with UpdateAddon"
+            if aws eks update-addon --cluster-name "$CLUSTER" --addon-name "$NAME" \
+                 --resolve-conflicts OVERWRITE --region "$REGION" >/dev/null 2>update.err; then
+              if aws eks wait addon-active --cluster-name "$CLUSTER" --addon-name "$NAME" --region "$REGION"; then
+                if [ "$IN_STATE" = 1 ]; then
+                  terraform untaint "$ADDR" 2>/dev/null || true
+                else
+                  terraform import -input=false "$ADDR" "${CLUSTER}:${NAME}"
+                fi
+                echo "  $NAME recovered in place and is ACTIVE"
+                return 0
+              fi
+              aws eks describe-addon --cluster-name "$CLUSTER" --addon-name "$NAME" --region "$REGION" \
+                --query "addon.health.issues" --output table || true
+            else
+              cat update.err
             fi
 
+            echo "::error::$NAME is stuck in $STATUS and this IAM user can neither delete nor update it."
+            return 1
+          }
+
+          FAILED=0
+          for NAME in "${!ADDONS[@]}"; do
+            ADDR="aws_eks_addon.${ADDONS[$NAME]}"
+            IN_STATE=0
+            if grep -qx "$ADDR" <<<"$STATE"; then IN_STATE=1; fi
+
             STATUS=$(aws eks describe-addon --cluster-name "$CLUSTER" --addon-name "$NAME" \
-              --region "$REGION" --query 'addon.status' --output text 2>/dev/null || echo "NONE")
+              --region "$REGION" --query "addon.status" --output text 2>/dev/null || echo "NONE")
 
             case "$STATUS" in
               NONE)
                 echo "• $NAME not installed — Terraform will create it"
                 ;;
               CREATE_FAILED|DELETE_FAILED)
-                echo "✗ $NAME is $STATUS — deleting so Terraform can recreate it"
-                aws eks delete-addon --cluster-name "$CLUSTER" --addon-name "$NAME" --region "$REGION" >/dev/null
-                aws eks wait addon-deleted --cluster-name "$CLUSTER" --addon-name "$NAME" --region "$REGION"
+                recover_addon "$NAME" "$ADDR" "$IN_STATE" || FAILED=1
                 ;;
               *)
-                echo "→ $NAME exists ($STATUS) outside Terraform — importing into $ADDR"
-                terraform import -input=false "$ADDR" "${CLUSTER}:${NAME}"
+                if [ "$IN_STATE" = 1 ]; then
+                  # Healthy on the cluster but tainted by an earlier failed apply:
+                  # keep it instead of letting Terraform delete/recreate it.
+                  if terraform state show "$ADDR" 2>/dev/null | head -1 | grep -q tainted; then
+                    echo "↺ $NAME is $STATUS but tainted in state — untainting"
+                    terraform untaint "$ADDR"
+                  else
+                    echo "✓ $NAME already managed by Terraform ($STATUS)"
+                  fi
+                else
+                  echo "→ $NAME exists ($STATUS) outside Terraform — importing into $ADDR"
+                  terraform import -input=false "$ADDR" "${CLUSTER}:${NAME}"
+                fi
                 ;;
             esac
           done
+
+          exit $FAILED
 
       # All vars passed explicitly — no defaults relied on from variables.tf
       - name: Terraform Plan
         working-directory: ${{ env.TF_DIR }}
         run: |
+          echo "Argo CD source: ${{ github.server_url }}/${{ github.repository }}.git @ ${{ github.ref_name }}"
           terraform plan \
             -var="aws_region=${{ inputs.aws_region }}" \
             -var="cluster_name=${{ needs.bootstrap.outputs.cluster_name }}" \
             -var="root_domain=${{ inputs.root_domain }}" \
             -var="app_subdomain=${{ inputs.app_subdomain }}" \
             -var="use_predefined_role=${{ needs.bootstrap.outputs.use_predefined_role }}" \
+            -var="gitops_repo_url=${{ github.server_url }}/${{ github.repository }}.git" \
+            -var="gitops_target_revision=${{ github.ref_name }}" \
+            -var="image_registry=${{ needs.bootstrap.outputs.ecr_registry }}" \
+            -var="image_tag=${{ needs.resolve-tag.outputs.image_tag }}" \
             -out=tfplan \
             -input=false
 
@@ -596,6 +665,10 @@ jobs:
             -var="root_domain=${{ inputs.root_domain }}" \
             -var="app_subdomain=${{ inputs.app_subdomain }}" \
             -var="use_predefined_role=${{ needs.bootstrap.outputs.use_predefined_role }}" \
+            -var="gitops_repo_url=${{ github.server_url }}/${{ github.repository }}.git" \
+            -var="gitops_target_revision=${{ github.ref_name }}" \
+            -var="image_registry=${{ needs.bootstrap.outputs.ecr_registry }}" \
+            -var="image_tag=${{ needs.resolve-tag.outputs.image_tag }}" \
             -auto-approve \
             -input=false
 
@@ -649,6 +722,40 @@ jobs:
       - name: Wait for UI deployment
         if: ${{ inputs.action == 'apply' }}
         run: kubectl rollout status deployment/ui -n default --timeout=10m
+
+      - name: Verify Argo CD application
+        if: ${{ inputs.action == 'apply' }}
+        run: |
+          APP=retail-store
+          kubectl get pods -n argocd
+
+          for attempt in $(seq 1 60); do
+            SYNC=$(kubectl -n argocd get application "$APP" -o jsonpath='{.status.sync.status}')
+            HEALTH=$(kubectl -n argocd get application "$APP" -o jsonpath='{.status.health.status}')
+            REV=$(kubectl -n argocd get application "$APP" -o jsonpath='{.status.sync.revision}')
+            echo "sync=$SYNC health=$HEALTH revision=$REV ($attempt/60)"
+            if [ "$SYNC" = "Synced" ] && [ "$HEALTH" = "Healthy" ]; then
+              break
+            fi
+            sleep 10
+          done
+
+          echo "### Argo CD" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Application | ${APP} (namespace argocd) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Source | \`${TF_VAR_gitops_repo_url}\` @ \`${TF_VAR_gitops_target_revision}\` / \`deploy/helm/retail-store\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Sync / Health | ${SYNC} / ${HEALTH} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Revision | ${REV} |" >> $GITHUB_STEP_SUMMARY
+          echo "| UI access | \`kubectl port-forward svc/argocd-server -n argocd 8080:80\` → http://localhost:8080 (user \`admin\`) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Admin password | \`kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' \| base64 -d\` |" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$SYNC" != "Synced" ] || [ "$HEALTH" != "Healthy" ]; then
+            echo "Argo CD application is not Synced/Healthy:"
+            kubectl -n argocd get application "$APP" -o jsonpath='{range .status.conditions[*]}{.type}: {.message}{"\n"}{end}'
+            kubectl -n argocd get application "$APP" -o json | jq -r '.status.resources[]? | select(.health.status? and .health.status != "Healthy") | "\(.kind)/\(.name): \(.health.status) \(.health.message // "")"'
+            exit 1
+          fi
 
       - name: Deployment summary
         if: ${{ inputs.action == 'apply' }}
