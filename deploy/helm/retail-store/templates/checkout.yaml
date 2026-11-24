@@ -86,6 +86,8 @@ metadata:
     app.kubernetes.io/managed-by: Helm
 spec:
   replicas: 1
+  # Slow JVM start on small nodes (+ CloudWatch auto-instrumentation)
+  progressDeadlineSeconds: 1800
   strategy:
     rollingUpdate:
       maxUnavailable: 1
@@ -161,6 +163,8 @@ metadata:
     app.kubernetes.io/managed-by: Helm
 spec:
   replicas: 1
+  # Slow JVM start on small nodes (+ CloudWatch auto-instrumentation)
+  progressDeadlineSeconds: 1800
   selector:
     matchLabels:
       app.kubernetes.io/name: checkout

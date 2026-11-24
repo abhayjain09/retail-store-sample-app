@@ -59,6 +59,16 @@ variable "cloudwatch_container_logs_enabled" {
   default     = null
 }
 
+# Application Signals auto-monitoring injects OpenTelemetry agents (init
+# containers + Java agent) into every workload. On t3.medium nodes this more
+# than doubles JVM startup (ui: ~4 min), so it is off by default. Metrics,
+# Container Insights and logs are unaffected.
+variable "cloudwatch_application_signals_enabled" {
+  type        = bool
+  description = "Let amazon-cloudwatch-observability auto-instrument all workloads for Application Signals (traces / service map)."
+  default     = false
+}
+
 locals {
   addons_oidc_issuer = replace(aws_iam_openid_connect_provider.eks.url, "https://", "")
 
@@ -88,6 +98,13 @@ locals {
   ]
 
   cloudwatch_container_logs_enabled = var.cloudwatch_container_logs_enabled != null ? var.cloudwatch_container_logs_enabled : !var.fluent_bit_cloudwatch_enabled
+
+  cloudwatch_addon_config = merge(
+    local.cloudwatch_container_logs_enabled ? {} : { containerLogs = { enabled = false } },
+    var.cloudwatch_application_signals_enabled ? {} : {
+      manager = { applicationSignals = { autoMonitor = { monitorAllServices = false } } }
+    },
+  )
 }
 
 # ---- Resolve add-on versions compatible with the cluster's Kubernetes version ----
@@ -360,7 +377,9 @@ resource "aws_eks_addon" "cloudwatch_observability" {
   # The add-on ships its own Fluent Bit for Container Insights logs. It is turned
   # off while the standalone fluent-bit add-on ships to CloudWatch, otherwise
   # every log line lands in CloudWatch twice. Metrics are unaffected.
-  configuration_values = local.cloudwatch_container_logs_enabled ? null : jsonencode({ containerLogs = { enabled = false } })
+  # Application Signals auto-instrumentation is also off by default (see
+  # var.cloudwatch_application_signals_enabled).
+  configuration_values = length(local.cloudwatch_addon_config) > 0 ? jsonencode(local.cloudwatch_addon_config) : null
 
   timeouts {
     create = "30m"

@@ -395,6 +395,8 @@ jobs:
       TF_VAR_use_predefined_role: ${{ needs.bootstrap.outputs.use_predefined_role }}
       # fluent-bit → CloudWatch Logs (repository variable; default on)
       TF_VAR_fluent_bit_cloudwatch_enabled: ${{ vars.FLUENT_BIT_CLOUDWATCH_ENABLED || 'true' }}
+      # CloudWatch Application Signals auto-instrumentation (repository variable; default off, it slows JVM startup)
+      TF_VAR_cloudwatch_application_signals_enabled: ${{ vars.CLOUDWATCH_APPLICATION_SIGNALS_ENABLED || 'false' }}
       # Argo CD / Helm: images for the retail-store chart and the Git source
       # Argo CD syncs from (this repo, the branch the pipeline runs on).
       TF_VAR_image_registry:          ${{ needs.bootstrap.outputs.ecr_registry }}
@@ -719,9 +721,55 @@ jobs:
           kubectl patch cronjob duckdns-sync -n default --type=merge \
             --patch='{"spec":{"concurrencyPolicy":"Forbid","successfulJobsHistoryLimit":1,"failedJobsHistoryLimit":2}}'
 
+      # Pods created while Application Signals auto-monitoring was on keep the
+      # injected OpenTelemetry agent until restarted. Restart only those.
+      - name: Remove injected Application Signals agents
+        if: ${{ inputs.action == 'apply' && env.TF_VAR_cloudwatch_application_signals_enabled != 'true' }}
+        run: |
+          INSTRUMENTED=$(kubectl get pods -n default -o json | jq -r '
+            .items[]
+            | select(any(.spec.initContainers[]?; .name | startswith("opentelemetry-auto-instrumentation")))
+            | .metadata.ownerReferences[0] | "\(.kind)/\(.name)"' | sort -u)
+          if [ -z "$INSTRUMENTED" ]; then
+            echo "No pods carry the Application Signals agent."
+            exit 0
+          fi
+          for OWNER in $INSTRUMENTED; do
+            case "$OWNER" in
+              ReplicaSet/*)
+                RS=${OWNER#ReplicaSet/}
+                DEPLOY=$(kubectl get rs "$RS" -n default -o jsonpath='{.metadata.ownerReferences[0].name}')
+                echo "Restarting deployment/$DEPLOY"
+                kubectl rollout restart deployment/"$DEPLOY" -n default ;;
+              StatefulSet/*)
+                echo "Restarting ${OWNER,,}"
+                kubectl rollout restart "${OWNER,,}" -n default ;;
+            esac
+          done
+
       - name: Wait for UI deployment
         if: ${{ inputs.action == 'apply' }}
-        run: kubectl rollout status deployment/ui -n default --timeout=10m
+        run: |
+          if kubectl rollout status deployment/ui -n default --timeout=20m; then
+            exit 0
+          fi
+
+          echo "::group::Pods in default namespace"
+          kubectl get pods -n default -o wide || true
+          echo "::endgroup::"
+          echo "::group::ui pod details"
+          kubectl describe pod -n default -l app.kubernetes.io/name=ui,app.kubernetes.io/component=service | tail -60 || true
+          echo "::endgroup::"
+          echo "::group::ui logs"
+          kubectl logs -n default deployment/ui --tail=80 --all-containers || true
+          echo "::endgroup::"
+          echo "::group::Node capacity"
+          kubectl describe nodes | grep -A8 "Allocated resources" || true
+          echo "::endgroup::"
+          echo "::group::Argo CD application"
+          kubectl -n argocd get application retail-store -o wide || true
+          echo "::endgroup::"
+          exit 1
 
       - name: Verify Argo CD application
         if: ${{ inputs.action == 'apply' }}
