@@ -308,6 +308,48 @@ resource "aws_eks_addon" "node_monitoring_agent" {
   ]
 }
 
+# ---- Wait for the ALB controller webhook ----
+# The aws-load-balancer-controller registers a mutating webhook for every
+# Service (failurePolicy: Fail). While its pods are not ready -- right after
+# install, or while nodes are being replaced -- any add-on that creates a
+# Service fails with "no endpoints available for service
+# aws-load-balancer-webhook-service". Block until the webhook has endpoints.
+resource "null_resource" "alb_webhook_ready" {
+  triggers = {
+    cluster_name  = aws_eks_cluster.demo_eks.name
+    alb_release   = "${helm_release.alb_controller.version}-${helm_release.alb_controller.metadata[0].revision}"
+    node_template = aws_launch_template.node_launch_template.latest_version
+    node_count    = var.node_group_desired_capacity
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -e
+      aws eks update-kubeconfig --region ${var.aws_region} --name ${aws_eks_cluster.demo_eks.name}
+      kubectl -n kube-system rollout status deployment/aws-load-balancer-controller --timeout=10m || true
+      for i in $(seq 1 60); do
+        ep=$(kubectl -n kube-system get endpoints aws-load-balancer-webhook-service \
+          -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)
+        if [ -n "$ep" ]; then
+          echo "ALB controller webhook ready: $ep"
+          exit 0
+        fi
+        echo "Waiting for aws-load-balancer-webhook-service endpoints ($i/60)..."
+        sleep 10
+      done
+      echo "ALB controller webhook has no endpoints after 10 minutes:"
+      kubectl -n kube-system get pods -l app.kubernetes.io/name=aws-load-balancer-controller -o wide || true
+      exit 1
+    EOT
+  }
+
+  depends_on = [
+    helm_release.alb_controller,
+    aws_cloudformation_stack.autoscaling_group,
+    aws_eks_addon.vpc_cni,
+  ]
+}
+
 resource "aws_eks_addon" "cloudwatch_observability" {
   cluster_name                = aws_eks_cluster.demo_eks.name
   addon_name                  = "amazon-cloudwatch-observability"
@@ -329,6 +371,7 @@ resource "aws_eks_addon" "cloudwatch_observability" {
     aws_iam_role_policy_attachment.cloudwatch_agent,
     aws_iam_role_policy_attachment.cloudwatch_xray,
     aws_eks_addon.vpc_cni,
+    null_resource.alb_webhook_ready,
   ]
 }
 
@@ -348,6 +391,7 @@ resource "aws_eks_addon" "fluent_bit" {
   depends_on = [
     aws_iam_role_policy_attachment.fluent_bit_logs,
     aws_eks_addon.vpc_cni,
+    null_resource.alb_webhook_ready,
   ]
 }
 

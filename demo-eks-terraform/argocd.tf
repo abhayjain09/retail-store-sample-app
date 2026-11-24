@@ -129,6 +129,7 @@ resource "helm_release" "argocd" {
     aws_cloudformation_stack.autoscaling_group,
     kubernetes_config_map.aws_auth,
     aws_eks_addon.vpc_cni,
+    null_resource.alb_webhook_ready,
   ]
 }
 
