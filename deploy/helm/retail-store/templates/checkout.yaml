@@ -1,0 +1,186 @@
+---
+# Source: retail-store-sample-checkout-chart/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: checkout
+  labels:
+    helm.sh/chart: checkout-1.5.0
+    app.kubernetes.io/name: checkout
+    app.kubernetes.io/instance: checkout
+    app.kubernetes.io/component: service
+    app.kubernetes.io/owner: retail-store-sample
+    app.kubernetes.io/managed-by: Helm
+---
+# Source: retail-store-sample-checkout-chart/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: checkout
+data:
+  RETAIL_CHECKOUT_PERSISTENCE_PROVIDER: redis
+  RETAIL_CHECKOUT_PERSISTENCE_REDIS_URL: redis://checkout-redis:6379
+  RETAIL_CHECKOUT_ENDPOINTS_ORDERS: http://orders:80
+---
+# Source: retail-store-sample-checkout-chart/templates/redis-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkout-redis
+  labels:
+    helm.sh/chart: checkout-1.5.0
+    app.kubernetes.io/name: checkout
+    app.kubernetes.io/instance: checkout
+    app.kubernetes.io/component: redis
+    app.kubernetes.io/owner: retail-store-sample
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 6379
+      targetPort: redis
+      protocol: TCP
+      name: redis
+  selector:
+    app.kubernetes.io/name: checkout
+    app.kubernetes.io/instance: checkout
+    app.kubernetes.io/component: redis
+    app.kubernetes.io/owner: retail-store-sample
+---
+# Source: retail-store-sample-checkout-chart/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkout
+  labels:
+    helm.sh/chart: checkout-1.5.0
+    app.kubernetes.io/name: checkout
+    app.kubernetes.io/instance: checkout
+    app.kubernetes.io/component: service
+    app.kubernetes.io/owner: retail-store-sample
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: checkout
+    app.kubernetes.io/instance: checkout
+    app.kubernetes.io/component: service
+    app.kubernetes.io/owner: retail-store-sample
+---
+# Source: retail-store-sample-checkout-chart/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout
+  labels:
+    helm.sh/chart: checkout-1.5.0
+    app.kubernetes.io/name: checkout
+    app.kubernetes.io/instance: checkout
+    app.kubernetes.io/component: service
+    app.kubernetes.io/owner: retail-store-sample
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 1
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: checkout
+      app.kubernetes.io/instance: checkout
+      app.kubernetes.io/component: service
+      app.kubernetes.io/owner: retail-store-sample
+  template:
+    metadata:
+      annotations:
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8080"
+        prometheus.io/scrape: "true"
+      labels:
+        app.kubernetes.io/name: checkout
+        app.kubernetes.io/instance: checkout
+        app.kubernetes.io/component: service
+        app.kubernetes.io/owner: retail-store-sample
+    spec:
+      serviceAccountName: checkout
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: checkout
+          envFrom:
+            - configMapRef:
+                name: checkout
+          securityContext:
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+          image: {{ include "retail-store.serviceImage" (dict "root" $ "name" "checkout") | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 128m
+              memory: 256Mi
+          volumeMounts:
+            - mountPath: /tmp
+              name: tmp-volume
+      volumes:
+        - name: tmp-volume
+          emptyDir:
+            medium: Memory
+---
+# Source: retail-store-sample-checkout-chart/templates/redis-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-redis
+  labels:
+    helm.sh/chart: checkout-1.5.0
+    app.kubernetes.io/name: checkout
+    app.kubernetes.io/instance: checkout
+    app.kubernetes.io/component: redis
+    app.kubernetes.io/owner: retail-store-sample
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: checkout
+      app.kubernetes.io/instance: checkout
+      app.kubernetes.io/component: redis
+      app.kubernetes.io/owner: retail-store-sample
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: checkout
+        app.kubernetes.io/instance: checkout
+        app.kubernetes.io/component: redis
+        app.kubernetes.io/owner: retail-store-sample
+    spec:
+      containers:
+        - name: redis
+          image: {{ .Values.dependencyImages.redis | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+

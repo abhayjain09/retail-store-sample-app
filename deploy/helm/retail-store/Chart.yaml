@@ -1,0 +1,6 @@
+apiVersion: v2
+name: retail-store
+description: Retail store sample app (catalog, cart, orders, checkout, ui) with ALB + Cognito ingress. Deployed and synced by Argo CD.
+type: application
+version: 1.0.0
+appVersion: "1.5.0"

@@ -1,0 +1,29 @@
+# Values for the retail-store chart.
+#
+# On EKS these are supplied by Terraform (demo-eks-terraform/argocd.tf)
+# through the Argo CD Application, so the pipeline's image tag, private ECR
+# registry, ACM certificate and Cognito settings never need to be committed.
+
+# Service images: <registry>/retail-store-sample-<name>:<tag>
+image:
+  registry: public.ecr.aws/aws-containers
+  tag: "1.5.0"
+
+# Third-party dependency images (mirrored to private ECR by the pipeline)
+dependencyImages:
+  mysql: public.ecr.aws/docker/library/mysql:8.0
+  postgres: public.ecr.aws/docker/library/postgres:16.1
+  rabbitmq: public.ecr.aws/docker/library/rabbitmq:3-management
+  dynamodbLocal: public.ecr.aws/aws-dynamodb-local/aws-dynamodb-local:1.25.1
+  redis: redis:6.0-alpine
+
+# ALB ingress for the UI (all required)
+ingress:
+  host: ""
+  certificateArn: ""
+  # JSON: {"userPoolARN": "...", "userPoolClientID": "...", "userPoolDomain": "..."}
+  cognitoAuthConfig: ""
+
+ui:
+  # Cognito logout URL shown by the UI
+  authLogoutUrl: ""

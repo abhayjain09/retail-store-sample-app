@@ -2,31 +2,27 @@
 #
 # Retail-store sample app + ALB ingress.
 #
-# Applied with `kubectl apply -f` after the cluster, nodes, and
-# ALB controller are ready. Using a single null_resource here is
-# simpler than splitting the 30+ resources in retail-store.yaml
-# into individual kubernetes_manifest blocks.
+# The app is now a Helm chart (deploy/helm/retail-store) deployed and kept
+# in sync by Argo CD -- see argocd.tf. This file keeps the pieces that live
+# outside the chart: the OpenAI secret and the ingress lookup/output.
 #
 ####################################################################
 
-locals {
-  retail_store_manifest = templatefile("${path.module}/retail-store.yaml.tftpl", {
-    cognito_auth_config = local.cognito_auth_config
-    cognito_logout_url  = local.cognito_logout_url
-    ui_certificate_arn  = aws_acm_certificate.ui.arn
-    ui_fqdn             = local.app_fqdn
-  })
+# The app used to be applied with `kubectl apply` from this null_resource.
+# Forget it without running its destroy provisioner (which would delete the
+# running app); Argo CD adopts the existing objects on its first sync.
+removed {
+  from = null_resource.retail_store
+
+  lifecycle {
+    destroy = false
+  }
 }
 
-resource "local_file" "retail_store_manifest" {
-  filename = "${path.module}/retail-store.rendered.yaml"
-  content  = local.retail_store_manifest
-}
-
-resource "null_resource" "retail_store" {
+# Holds the OpenAI key, so it stays out of Git and the Argo CD Application.
+# Referenced by the ui Deployment (secretKeyRef retail-store-openai).
+resource "null_resource" "retail_store_openai_secret" {
   triggers = {
-    manifest_sha       = sha256(local.retail_store_manifest)
-    manifest_payload   = sensitive(base64encode(local.retail_store_manifest))
     cluster_name       = aws_eks_cluster.demo_eks.name
     openai_config_hash = sha256(var.openai_api_key)
   }
@@ -46,41 +42,11 @@ resource "null_resource" "retail_store" {
         --from-literal=chat-enabled="$chat_enabled" \
         --from-literal=api-key="$OPENAI_API_KEY" \
         --dry-run=client -o yaml | kubectl apply -f -
-
-      kubectl apply -f ${local_file.retail_store_manifest.filename}
-
-      # Block until the ALB controller publishes the ingress hostname so the
-      # kubernetes_ingress_v1 data source below sees a stable value when read.
-      for i in $(seq 1 60); do
-        host=$(kubectl get ingress ui -n default -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
-        if [ -n "$host" ]; then
-          echo "ALB hostname: $host"
-          exit 0
-        fi
-        echo "Waiting for ALB hostname ($i/60)..."
-        sleep 10
-      done
-      echo "WARNING: ALB hostname not available after 10 minutes"
-    EOT
-  }
-
-  provisioner "local-exec" {
-    when    = destroy
-    command = <<-EOT
-      manifest_payload='${lookup(self.triggers, "manifest_payload", "")}'
-      if [ -n "$manifest_payload" ]; then
-        printf '%s' "$manifest_payload" | base64 --decode | kubectl delete -f - --ignore-not-found=true || true
-      else
-        echo "Skipping manifest deletion for legacy state without a stored payload."
-      fi
     EOT
   }
 
   depends_on = [
-    aws_acm_certificate.ui,
-    helm_release.alb_controller,
     kubernetes_config_map.aws_auth,
-    local_file.retail_store_manifest,
     aws_cloudformation_stack.autoscaling_group,
   ]
 }
@@ -90,7 +56,7 @@ data "kubernetes_ingress_v1" "ui" {
     name      = "ui"
     namespace = "default"
   }
-  depends_on = [null_resource.retail_store]
+  depends_on = [null_resource.retail_store_sync]
 }
 
 output "ui_alb_dns_name" {

@@ -1,0 +1,221 @@
+---
+# Source: retail-store-sample-ui-chart/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ui
+  labels:
+    helm.sh/chart: ui-1.5.0
+    app.kubernetes.io/name: ui
+    app.kubernetes.io/instance: ui
+    app.kubernetes.io/component: service
+    app.kubernetes.io/owner: retail-store-sample
+    app.kubernetes.io/managed-by: Helm
+---
+# Source: retail-store-sample-ui-chart/templates/configmap.yml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ui
+data:
+  RETAIL_UI_ENDPOINTS_CATALOG: http://catalog
+  RETAIL_UI_ENDPOINTS_CARTS: http://carts
+  RETAIL_UI_ENDPOINTS_CHECKOUT: http://checkout
+  RETAIL_UI_ENDPOINTS_ORDERS: http://orders
+---
+# Source: retail-store-sample-ui-chart/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui
+  labels:
+    helm.sh/chart: ui-1.5.0
+    app.kubernetes.io/name: ui
+    app.kubernetes.io/instance: ui
+    app.kubernetes.io/component: service
+    app.kubernetes.io/owner: retail-store-sample
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: ui
+    app.kubernetes.io/instance: ui
+    app.kubernetes.io/component: service
+    app.kubernetes.io/owner: retail-store-sample
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ui
+  namespace: default
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/load-balancer-name: retail-store-ui
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: '443'
+    alb.ingress.kubernetes.io/certificate-arn: {{ required "ingress.certificateArn is required" .Values.ingress.certificateArn | quote }}
+    alb.ingress.kubernetes.io/auth-type: cognito
+    alb.ingress.kubernetes.io/auth-idp-cognito: {{ required "ingress.cognitoAuthConfig is required" .Values.ingress.cognitoAuthConfig | quote }}
+    alb.ingress.kubernetes.io/auth-on-unauthenticated-request: authenticate
+    alb.ingress.kubernetes.io/auth-scope: 'openid email profile'
+    alb.ingress.kubernetes.io/auth-session-cookie: retail-store-auth
+    alb.ingress.kubernetes.io/auth-session-timeout: '3600'
+spec:
+  ingressClassName: alb
+  rules:
+    - host: {{ required "ingress.host is required" .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ui
+                port:
+                  number: 80
+---
+# Source: retail-store-sample-ui-chart/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ui
+  labels:
+    helm.sh/chart: ui-1.5.0
+    app.kubernetes.io/name: ui
+    app.kubernetes.io/instance: ui
+    app.kubernetes.io/component: service
+    app.kubernetes.io/owner: retail-store-sample
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 1
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ui
+      app.kubernetes.io/instance: ui
+      app.kubernetes.io/component: service
+      app.kubernetes.io/owner: retail-store-sample
+  template:
+    metadata:
+      annotations:
+        prometheus.io/path: /actuator/prometheus
+        prometheus.io/port: "8080"
+        prometheus.io/scrape: "true"
+      labels:
+        app.kubernetes.io/name: ui
+        app.kubernetes.io/instance: ui
+        app.kubernetes.io/component: service
+        app.kubernetes.io/owner: retail-store-sample
+    spec:
+      serviceAccountName: ui
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: ui
+          env:
+            - name: JAVA_OPTS
+              value: -XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/urandom
+            - name: RETAIL_UI_AUTH_LOGOUT_URL
+              value: {{ .Values.ui.authLogoutUrl | quote }}
+            - name: RETAIL_UI_AUTH_SESSION_COOKIE_NAME
+              value: "retail-store-auth"
+            - name: RETAIL_UI_CHAT_ENABLED
+              valueFrom:
+                secretKeyRef:
+                  name: retail-store-openai
+                  key: chat-enabled
+            - name: RETAIL_UI_CHAT_PROVIDER
+              value: "openai"
+            - name: RETAIL_UI_CHAT_MODEL
+              value: "deepseek/deepseek-v3.2"
+            - name: RETAIL_UI_CHAT_OPENAI_BASE_URL
+              value: "https://api.ai.kodekloud.com"
+            - name: RETAIL_UI_CHAT_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: retail-store-openai
+                  key: api-key
+            - name: METADATA_KUBERNETES_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: METADATA_KUBERNETES_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: METADATA_KUBERNETES_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          envFrom:
+            - configMapRef:
+                name: ui
+          securityContext:
+            capabilities:
+              add:
+              - NET_BIND_SERVICE
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+          image: {{ include "retail-store.serviceImage" (dict "root" $ "name" "ui") | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 10
+          resources:
+            limits:
+              memory: 512Mi
+            requests:
+              cpu: 128m
+              memory: 512Mi
+          volumeMounts:
+            - mountPath: /tmp
+              name: tmp-volume
+      volumes:
+        - name: tmp-volume
+          emptyDir:
+            medium: Memory
+---
+# Source: retail-store-sample-ui-chart/templates/hpa.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ui
+  labels:
+    helm.sh/chart: ui-1.5.0
+    app.kubernetes.io/name: ui
+    app.kubernetes.io/instance: ui
+    app.kubernetes.io/component: service
+    app.kubernetes.io/owner: retail-store-sample
+    app.kubernetes.io/managed-by: Helm
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ui
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50

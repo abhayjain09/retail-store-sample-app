@@ -1,0 +1,246 @@
+---
+# Source: retail-store-sample-catalog-chart/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: catalog
+  labels:
+    helm.sh/chart: catalog-1.5.0
+    app.kubernetes.io/name: catalog
+    app.kubernetes.io/instance: catalog
+    app.kubernetes.io/component: service
+    app.kubernetes.io/owner: retail-store-sample
+    app.kubernetes.io/managed-by: Helm
+---
+# Source: retail-store-sample-catalog-chart/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: catalog-db
+data:
+  RETAIL_CATALOG_PERSISTENCE_USER: "Y2F0YWxvZw=="
+  RETAIL_CATALOG_PERSISTENCE_PASSWORD: "eHdaV3g0UXZVTEN5R2c1eQ=="
+---
+# Source: retail-store-sample-catalog-chart/templates/configmap.yml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: catalog
+data:
+  RETAIL_CATALOG_PERSISTENCE_PROVIDER: mysql
+  RETAIL_CATALOG_PERSISTENCE_ENDPOINT: catalog-mysql:3306
+  RETAIL_CATALOG_PERSISTENCE_DB_NAME: catalog
+---
+# Source: retail-store-sample-catalog-chart/templates/mysql-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog-mysql
+  labels:
+    helm.sh/chart: catalog-1.5.0
+    app.kubernetes.io/name: catalog
+    app.kubernetes.io/instance: catalog
+    app.kubernetes.io/component: mysql
+    app.kubernetes.io/owner: retail-store-sample
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 3306
+      targetPort: mysql
+      protocol: TCP
+      name: mysql
+  selector:
+    app.kubernetes.io/name: catalog
+    app.kubernetes.io/instance: catalog
+    app.kubernetes.io/component: mysql
+    app.kubernetes.io/owner: retail-store-sample
+---
+# Source: retail-store-sample-catalog-chart/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: catalog
+  labels:
+    helm.sh/chart: catalog-1.5.0
+    app.kubernetes.io/name: catalog
+    app.kubernetes.io/instance: catalog
+    app.kubernetes.io/component: service
+    app.kubernetes.io/owner: retail-store-sample
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: catalog
+    app.kubernetes.io/instance: catalog
+    app.kubernetes.io/component: service
+    app.kubernetes.io/owner: retail-store-sample
+---
+# Source: retail-store-sample-catalog-chart/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog
+  labels:
+    helm.sh/chart: catalog-1.5.0
+    app.kubernetes.io/name: catalog
+    app.kubernetes.io/instance: catalog
+    app.kubernetes.io/component: service
+    app.kubernetes.io/owner: retail-store-sample
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 1
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: catalog
+      app.kubernetes.io/instance: catalog
+      app.kubernetes.io/component: service
+      app.kubernetes.io/owner: retail-store-sample
+  template:
+    metadata:
+      annotations:
+        prometheus.io/path: /metrics
+        prometheus.io/port: "8080"
+        prometheus.io/scrape: "true"
+      labels:
+        app.kubernetes.io/name: catalog
+        app.kubernetes.io/instance: catalog
+        app.kubernetes.io/component: service
+        app.kubernetes.io/owner: retail-store-sample
+    spec:
+      serviceAccountName: catalog
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: catalog
+          envFrom:
+            - configMapRef:
+                name: catalog
+            - secretRef:
+                name: catalog-db
+          securityContext:
+            capabilities:
+              drop:
+              - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+          image: {{ include "retail-store.serviceImage" (dict "root" $ "name" "catalog") | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 256m
+              memory: 256Mi
+          volumeMounts:
+            - mountPath: /tmp
+              name: tmp-volume
+      volumes:
+        - name: tmp-volume
+          emptyDir:
+            medium: Memory
+---
+# Source: retail-store-sample-catalog-chart/templates/hpa.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: catalog
+  labels:
+    helm.sh/chart: catalog-1.5.0
+    app.kubernetes.io/name: catalog
+    app.kubernetes.io/instance: catalog
+    app.kubernetes.io/component: service
+    app.kubernetes.io/owner: retail-store-sample
+    app.kubernetes.io/managed-by: Helm
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: catalog
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+---
+# Source: retail-store-sample-catalog-chart/templates/mysql-statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: catalog-mysql
+  labels:
+    helm.sh/chart: catalog-1.5.0
+    app.kubernetes.io/name: catalog
+    app.kubernetes.io/instance: catalog
+    app.kubernetes.io/component: mysql
+    app.kubernetes.io/owner: retail-store-sample
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  serviceName: catalog-mysql
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: catalog
+      app.kubernetes.io/instance: catalog
+      app.kubernetes.io/component: mysql
+      app.kubernetes.io/owner: retail-store-sample
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: catalog
+        app.kubernetes.io/instance: catalog
+        app.kubernetes.io/component: mysql
+        app.kubernetes.io/owner: retail-store-sample
+    spec:
+      containers:
+        - name: mysql
+          image: {{ .Values.dependencyImages.mysql | quote }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              value: my-secret-pw
+            - name: MYSQL_DATABASE
+              value: catalog
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: catalog-db
+                  key: RETAIL_CATALOG_PERSISTENCE_USER
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: catalog-db
+                  key: RETAIL_CATALOG_PERSISTENCE_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+          ports:
+            - name: mysql
+              containerPort: 3306
+              protocol: TCP
+      volumes:
+      - name: data
+        emptyDir: {}
+
