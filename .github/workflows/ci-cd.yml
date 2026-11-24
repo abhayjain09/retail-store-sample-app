@@ -721,31 +721,75 @@ jobs:
           kubectl patch cronjob duckdns-sync -n default --type=merge \
             --patch='{"spec":{"concurrencyPolicy":"Forbid","successfulJobsHistoryLimit":1,"failedJobsHistoryLimit":2}}'
 
-      # Pods created while Application Signals auto-monitoring was on keep the
-      # injected OpenTelemetry agent until restarted. Restart only those.
-      - name: Remove injected Application Signals agents
+      # The amazon-cloudwatch-observability operator's auto-monitor rewrites every
+      # Deployment/StatefulSet to inject OpenTelemetry agents (slow JVM start on
+      # t3.medium). The lab denies eks:UpdateAddon, so the add-on setting cannot be
+      # changed; instead turn auto-monitor off in the operator's own Deployment
+      # args, then strip the annotations it added to the app workloads.
+      - name: Disable Application Signals auto-instrumentation
         if: ${{ inputs.action == 'apply' && env.TF_VAR_cloudwatch_application_signals_enabled != 'true' }}
         run: |
-          INSTRUMENTED=$(kubectl get pods -n default -o json | jq -r '
-            .items[]
-            | select(any(.spec.initContainers[]?; .name | startswith("opentelemetry-auto-instrumentation")))
-            | .metadata.ownerReferences[0] | "\(.kind)/\(.name)"' | sort -u)
-          if [ -z "$INSTRUMENTED" ]; then
-            echo "No pods carry the Application Signals agent."
+          NS=amazon-cloudwatch
+          DEP=$(kubectl -n "$NS" get deploy -o name | grep controller-manager | head -1)
+          if [ -z "$DEP" ]; then
+            echo "::warning::CloudWatch operator deployment not found in $NS - skipping"
             exit 0
           fi
-          for OWNER in $INSTRUMENTED; do
-            case "$OWNER" in
-              ReplicaSet/*)
-                RS=${OWNER#ReplicaSet/}
-                DEPLOY=$(kubectl get rs "$RS" -n default -o jsonpath='{.metadata.ownerReferences[0].name}')
-                echo "Restarting deployment/$DEPLOY"
-                kubectl rollout restart deployment/"$DEPLOY" -n default ;;
-              StatefulSet/*)
-                echo "Restarting ${OWNER,,}"
-                kubectl rollout restart "${OWNER,,}" -n default ;;
-            esac
+
+          ARGS=$(kubectl -n "$NS" get "$DEP" -o json | jq -c '.spec.template.spec.containers[0].args // []')
+          echo "Operator args: $ARGS"
+          IDX=$(jq -r 'map(startswith("--auto-monitor-config=")) | index(true) // empty' <<<"$ARGS")
+
+          if [ -z "$IDX" ]; then
+            echo "::warning::$DEP has no --auto-monitor-config argument - cannot turn auto-monitor off"
+          else
+            CUR=$(jq -r ".[$IDX] | sub(\"^--auto-monitor-config=\"; \"\")" <<<"$ARGS")
+            if [ "$(jq -r '.monitorAllServices' <<<"$CUR")" = "false" ]; then
+              echo "Auto-monitor already off: $CUR"
+            else
+              NEW=$(jq -c '.monitorAllServices = false' <<<"$CUR")
+              echo "Auto-monitor: $CUR -> $NEW"
+              PATCH=$(jq -nc --arg v "--auto-monitor-config=$NEW" --argjson i "$IDX" \
+                '[{op: "replace", path: "/spec/template/spec/containers/0/args/\($i)", value: $v}]')
+              kubectl -n "$NS" patch "$DEP" --type=json -p "$PATCH"
+              kubectl -n "$NS" rollout status "$DEP" --timeout=5m
+            fi
+          fi
+
+          # Remove the operator's annotations from the app workloads and set the
+          # chart's opt-out values (this rolls the pods without the agent).
+          PATCH='{"spec":{"template":{"metadata":{"annotations":{
+            "cloudwatch.aws.amazon.com/auto-annotate-java":null,
+            "cloudwatch.aws.amazon.com/auto-annotate-nodejs":null,
+            "cloudwatch.aws.amazon.com/auto-annotate-python":null,
+            "cloudwatch.aws.amazon.com/auto-annotate-dotnet":null,
+            "instrumentation.opentelemetry.io/inject-java":"false",
+            "instrumentation.opentelemetry.io/inject-nodejs":"false",
+            "instrumentation.opentelemetry.io/inject-python":"false",
+            "instrumentation.opentelemetry.io/inject-dotnet":"false"}}}}}'
+          for W in $(kubectl get deploy,statefulset -n default -o json | jq -r '
+              .items[]
+              | select((.spec.template.metadata.annotations // {}) | to_entries
+                       | any(.key | startswith("cloudwatch.aws.amazon.com/auto-annotate")))
+              | "\(.kind | ascii_downcase)/\(.metadata.name)"'); do
+            echo "Removing injected agent from $W"
+            kubectl patch "$W" -n default --type=strategic -p "$PATCH"
           done
+
+          for W in $(kubectl get deploy,statefulset -n default -o name); do
+            kubectl rollout status "$W" -n default --timeout=20m || true
+          done
+
+          INSTRUMENTED=$(kubectl get pods -n default -o json | jq -r '
+            .items[]
+            | select(.status.phase == "Running")
+            | select(any(.spec.initContainers[]?; .name | startswith("opentelemetry-auto-instrumentation")))
+            | .metadata.name')
+          if [ -z "$INSTRUMENTED" ]; then
+            echo "No running pod carries the Application Signals agent."
+          else
+            echo "::warning::These pods still have the Application Signals agent injected: $(echo $INSTRUMENTED)"
+          fi
 
       - name: Wait for UI deployment
         if: ${{ inputs.action == 'apply' }}
