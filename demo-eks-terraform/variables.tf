@@ -58,6 +58,41 @@ variable "node_group_max_size" {
   default     = 3
 }
 
+# Lab limits: t2/t3 nano..medium only (max 2 vCPU / 4 GiB per instance),
+# max 10 vCPU / 20 GiB and 10 instances in total, volumes <= 30 GB gp2/gp3.
+locals {
+  lab_instance_vcpu = {
+    "t2.nano" = 1, "t2.micro" = 1, "t2.small" = 1, "t2.medium" = 2,
+    "t3.nano" = 2, "t3.micro" = 2, "t3.small" = 2, "t3.medium" = 2,
+  }
+  lab_instance_mem_gib = {
+    "t2.nano" = 0.5, "t2.micro" = 1, "t2.small" = 2, "t2.medium" = 4,
+    "t3.nano" = 0.5, "t3.micro" = 1, "t3.small" = 2, "t3.medium" = 4,
+  }
+}
+
+variable "node_instance_type" {
+  type        = string
+  description = "Worker node instance type (lab allows t2/t3 nano, micro, small, medium)"
+  default     = "t3.medium"
+
+  validation {
+    condition     = contains(["t2.nano", "t2.micro", "t2.small", "t2.medium", "t3.nano", "t3.micro", "t3.small", "t3.medium"], var.node_instance_type)
+    error_message = "The lab only allows t2/t3 nano, micro, small or medium instances."
+  }
+}
+
+variable "node_volume_size" {
+  type        = number
+  description = "Worker node root volume size in GB (lab max 30)"
+  default     = 30
+
+  validation {
+    condition     = var.node_volume_size >= 20 && var.node_volume_size <= 30
+    error_message = "Node volume size must be 20-30 GB (lab max 30 GB; the EKS AMI needs 20)."
+  }
+}
+
 # With VPC CNI prefix delegation (addons.tf) the ENI-based limit (17 pods on a
 # t3.medium) no longer applies; 110 is the AWS-recommended max for nodes with
 # fewer than 30 vCPUs. CPU/memory requests remain the real per-node limit.

@@ -4,6 +4,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: carts
+  namespace: {{ .Values.namespaces.carts }}
   labels:
     helm.sh/chart: carts-1.5.0
     app.kubernetes.io/name: carts
@@ -17,6 +18,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: carts
+  namespace: {{ .Values.namespaces.carts }}
 data:
   RETAIL_CART_PERSISTENCE_PROVIDER: dynamodb
   RETAIL_CART_PERSISTENCE_DYNAMODB_TABLE_NAME: Items
@@ -30,6 +32,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: carts-dynamodb
+  namespace: {{ .Values.namespaces.carts }}
   labels:
     helm.sh/chart: carts-1.5.0
     app.kubernetes.io/name: carts
@@ -55,6 +58,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: carts
+  namespace: {{ .Values.namespaces.carts }}
   labels:
     helm.sh/chart: carts-1.5.0
     app.kubernetes.io/name: carts
@@ -80,6 +84,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: carts
+  namespace: {{ .Values.namespaces.carts }}
   labels:
     helm.sh/chart: carts-1.5.0
     app.kubernetes.io/name: carts
@@ -93,6 +98,8 @@ spec:
   progressDeadlineSeconds: 1800
   strategy:
     rollingUpdate:
+      # Never surge: each namespace is capped at 3 pods
+      maxSurge: 0
       maxUnavailable: 1
     type: RollingUpdate
   selector:
@@ -104,6 +111,7 @@ spec:
   template:
     metadata:
       annotations:
+        {{- include "retail-store.podAnnotations" . | nindent 8 }}
         prometheus.io/path: /actuator/prometheus
         prometheus.io/port: "8080"
         prometheus.io/scrape: "true"
@@ -120,7 +128,7 @@ spec:
         - name: carts
           env:
             - name: JAVA_OPTS
-              value: -XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/urandom
+              value: {{ .Values.javaOpts | quote }}
           envFrom:
             - configMapRef:
                 name: carts
@@ -133,6 +141,8 @@ spec:
             runAsUser: 1000
           image: {{ include "retail-store.serviceImage" (dict "root" $ "name" "cart") | quote }}
           imagePullPolicy: IfNotPresent
+          resources:
+            {{- toYaml (index .Values.resources "carts") | nindent 12 }}
           ports:
             - name: http
               containerPort: 8080
@@ -142,12 +152,6 @@ spec:
               path: /actuator/health/readiness
               port: 8080
             initialDelaySeconds: 10
-          resources:
-            limits:
-              memory: 512Mi
-            requests:
-              cpu: 256m
-              memory: 512Mi
           volumeMounts:
             - mountPath: /tmp
               name: tmp-volume
@@ -161,6 +165,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: carts-dynamodb
+  namespace: {{ .Values.namespaces.carts }}
   labels:
     helm.sh/chart: carts-1.5.0
     app.kubernetes.io/name: carts
@@ -170,6 +175,8 @@ metadata:
     app.kubernetes.io/managed-by: Helm
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   # Slow JVM start on small nodes (+ CloudWatch auto-instrumentation)
   progressDeadlineSeconds: 1800
   selector:
@@ -180,6 +187,8 @@ spec:
       app.kubernetes.io/owner: retail-store-sample
   template:
     metadata:
+      annotations:
+        {{- include "retail-store.podAnnotations" . | nindent 8 }}
       labels:
         app.kubernetes.io/name: carts
         app.kubernetes.io/instance: carts
@@ -190,6 +199,8 @@ spec:
         - name: dynamodb
           image: {{ .Values.dependencyImages.dynamodbLocal | quote }}
           imagePullPolicy: IfNotPresent
+          resources:
+            {{- toYaml (index .Values.resources "cartsDynamodb") | nindent 12 }}
           ports:
             - name: dynamodb
               containerPort: 8000

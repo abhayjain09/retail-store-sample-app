@@ -5,7 +5,7 @@
 # - helm_release.argocd       installs Argo CD into the "argocd" namespace
 # - helm_release.argocd_apps  creates the Argo CD Application that syncs
 #                             deploy/helm/retail-store from this Git repo
-#                             into the "default" namespace
+#                             into the retail-* namespaces
 # - null_resource.retail_store_sync waits for the first sync and the ALB
 #
 # Values that change per run or per account (private ECR registry, image
@@ -57,6 +57,16 @@ variable "gitops_repo_token" {
   sensitive   = true
 }
 
+variable "argocd_server_enabled" {
+  type        = bool
+  description = <<-EOT
+    Run the argocd-server (web UI/API) pod. Off by default: the lab allows
+    3 pods per namespace and controller + repo-server + redis already use
+    them. Without it, open the UI locally with `argocd admin dashboard -n argocd`.
+  EOT
+  default     = false
+}
+
 variable "image_registry" {
   type        = string
   description = "Private ECR registry (<account>.dkr.ecr.<region>.amazonaws.com). Empty = public images."
@@ -74,7 +84,17 @@ locals {
   retail_store_app   = "retail-store"
   use_private_images = var.image_registry != ""
 
+  # One namespace per service group: the lab allows 3 pods per namespace
+  retail_store_namespaces = {
+    catalog  = "retail-catalog"
+    carts    = "retail-carts"
+    orders   = "retail-orders"
+    checkout = "retail-checkout"
+    ui       = "retail-ui"
+  }
+
   retail_store_values = {
+    namespaces = local.retail_store_namespaces
     image = {
       registry = local.use_private_images ? var.image_registry : "public.ecr.aws/aws-containers"
       tag      = var.image_tag
@@ -97,20 +117,75 @@ locals {
   }
 }
 
-resource "helm_release" "argocd" {
-  name             = "argocd"
-  repository       = "https://argoproj.github.io/argo-helm"
-  chart            = "argo-cd"
-  version          = var.argocd_chart_version
-  namespace        = local.argocd_namespace
-  create_namespace = true
-  wait             = true
-  timeout          = 900
+resource "kubernetes_namespace_v1" "argocd" {
+  metadata {
+    name = local.argocd_namespace
+  }
 
-  # Kept small for the 3 x t3.medium lab nodes: no Dex (SSO) or notifications.
+  depends_on = [
+    aws_cloudformation_stack.autoscaling_group,
+    kubernetes_config_map.aws_auth,
+  ]
+}
+
+# Redis password, created here instead of by the chart's redis-secret-init
+# hook Job (that Job would be a 4th pod in the argocd namespace).
+resource "kubernetes_secret_v1" "argocd_redis" {
+  metadata {
+    name      = "argocd-redis"
+    namespace = kubernetes_namespace_v1.argocd.metadata[0].name
+  }
+
+  data = {
+    auth = substr(sha256("argocd-redis:${tls_private_key.key_pair.private_key_pem}"), 0, 32)
+  }
+}
+
+resource "helm_release" "argocd" {
+  name       = "argocd"
+  repository = "https://argoproj.github.io/argo-helm"
+  chart      = "argo-cd"
+  version    = var.argocd_chart_version
+  namespace  = kubernetes_namespace_v1.argocd.metadata[0].name
+  wait       = true
+  timeout    = 900
+
+  # Lab limits: 3 pods per namespace, 256m CPU / 512Mi per pod.
+  # Runs only application-controller + repo-server + redis: no Dex (SSO),
+  # notifications, ApplicationSet controller, redis init Job or (by default)
+  # argocd-server. Limits total 350m / 704Mi.
   values = [yamlencode({
-    dex           = { enabled = false }
-    notifications = { enabled = false }
+    dex             = { enabled = false }
+    notifications   = { enabled = false }
+    applicationSet  = { replicas = 0 }
+    redisSecretInit = { enabled = false }
+    server = {
+      replicas = var.argocd_server_enabled ? 1 : 0
+      resources = {
+        requests = { cpu = "25m", memory = "64Mi" }
+        limits   = { cpu = "100m", memory = "128Mi" }
+      }
+    }
+    controller = {
+      resources = {
+        requests = { cpu = "100m", memory = "256Mi" }
+        limits   = { cpu = "200m", memory = "384Mi" }
+      }
+    }
+    repoServer = {
+      # No surge: a rolling update would be a 4th pod in the namespace
+      deploymentStrategy = { type = "Recreate" }
+      resources = {
+        requests = { cpu = "50m", memory = "128Mi" }
+        limits   = { cpu = "100m", memory = "256Mi" }
+      }
+    }
+    redis = {
+      resources = {
+        requests = { cpu = "25m", memory = "32Mi" }
+        limits   = { cpu = "50m", memory = "64Mi" }
+      }
+    }
     configs = {
       cm = {
         # Annotation tracking: the label method would overwrite the
@@ -130,6 +205,25 @@ resource "helm_release" "argocd" {
     kubernetes_config_map.aws_auth,
     aws_eks_addon.vpc_cni,
     null_resource.alb_webhook_ready,
+    kubernetes_secret_v1.argocd_redis,
+  ]
+}
+
+# Namespaces for the app (created here so the OpenAI secret can be placed in
+# retail-ui before Argo CD syncs; Argo CD never prunes them).
+resource "kubernetes_namespace_v1" "retail_store" {
+  for_each = local.retail_store_namespaces
+
+  metadata {
+    name = each.value
+    labels = {
+      "app.kubernetes.io/part-of" = "retail-store"
+    }
+  }
+
+  depends_on = [
+    aws_cloudformation_stack.autoscaling_group,
+    kubernetes_config_map.aws_auth,
   ]
 }
 
@@ -181,7 +275,7 @@ resource "helm_release" "argocd_apps" {
         }
         destination = {
           server    = "https://kubernetes.default.svc"
-          namespace = "default"
+          namespace = local.retail_store_namespaces.ui
         }
         syncPolicy = {
           automated = {
@@ -219,6 +313,7 @@ resource "helm_release" "argocd_apps" {
     helm_release.argocd,
     helm_release.alb_controller,
     kubernetes_secret_v1.argocd_repo,
+    kubernetes_namespace_v1.retail_store,
     null_resource.retail_store_openai_secret,
   ]
 }
@@ -233,6 +328,7 @@ resource "null_resource" "retail_store_sync" {
     region       = var.aws_region
     namespace    = local.argocd_namespace
     app          = local.retail_store_app
+    ui_namespace = local.retail_store_namespaces.ui
     values_hash  = sha256(jsonencode(helm_release.argocd_apps.values))
   }
 
@@ -248,7 +344,7 @@ resource "null_resource" "retail_store_sync" {
       for i in $(seq 1 90); do
         sync=$(kubectl -n "$NS" get application "$APP" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
         health=$(kubectl -n "$NS" get application "$APP" -o jsonpath='{.status.health.status}' 2>/dev/null || true)
-        host=$(kubectl get ingress ui -n default -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+        host=$(kubectl get ingress ui -n ${self.triggers.ui_namespace} -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
         echo "Argo CD $APP: sync=$${sync:-?} health=$${health:-?} alb=$${host:-pending} ($i/90)"
         if [ "$sync" = "Synced" ] && [ -n "$host" ]; then
           echo "ALB hostname: $host"
@@ -283,8 +379,8 @@ output "argocd_namespace" {
 
 output "argocd_access_commands" {
   value = {
-    port_forward   = "kubectl port-forward svc/argocd-server -n ${local.argocd_namespace} 8080:80"
-    admin_password = "kubectl -n ${local.argocd_namespace} get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+    ui             = var.argocd_server_enabled ? "kubectl port-forward svc/argocd-server -n ${local.argocd_namespace} 8080:80" : "argocd admin dashboard -n ${local.argocd_namespace}"
+    admin_password = var.argocd_server_enabled ? "kubectl -n ${local.argocd_namespace} get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d" : "not needed: argocd admin dashboard uses your kubeconfig"
     app_status     = "kubectl -n ${local.argocd_namespace} get application ${local.retail_store_app}"
   }
   description = "How to reach the Argo CD UI (user: admin) and check the app"

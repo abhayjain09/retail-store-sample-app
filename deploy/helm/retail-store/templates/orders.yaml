@@ -4,6 +4,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: orders
+  namespace: {{ .Values.namespaces.orders }}
   labels:
     helm.sh/chart: orders-1.5.0
     app.kubernetes.io/name: orders
@@ -17,6 +18,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: orders-rabbitmq
+  namespace: {{ .Values.namespaces.orders }}
 data:
 ---
 # Source: retail-store-sample-orders-chart/templates/secret-db.yaml
@@ -24,6 +26,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: orders-db
+  namespace: {{ .Values.namespaces.orders }}
 data:
   RETAIL_ORDERS_PERSISTENCE_USERNAME: "b3JkZXJz"
   RETAIL_ORDERS_PERSISTENCE_PASSWORD: "dEFiTHRmdUJnRW5nWlI2Yg=="
@@ -33,6 +36,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: orders
+  namespace: {{ .Values.namespaces.orders }}
 data:
   RETAIL_ORDERS_MESSAGING_PROVIDER: rabbitmq
   RETAIL_ORDERS_MESSAGING_RABBITMQ_ADDRESSES: orders-rabbitmq:5672
@@ -45,6 +49,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: orders-postgresql
+  namespace: {{ .Values.namespaces.orders }}
   labels:
     helm.sh/chart: orders-1.5.0
     app.kubernetes.io/name: orders
@@ -70,6 +75,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: orders-rabbitmq
+  namespace: {{ .Values.namespaces.orders }}
   labels:
     helm.sh/chart: orders-1.5.0
     app.kubernetes.io/name: orders
@@ -99,6 +105,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: orders
+  namespace: {{ .Values.namespaces.orders }}
   labels:
     helm.sh/chart: orders-1.5.0
     app.kubernetes.io/name: orders
@@ -124,6 +131,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: orders
+  namespace: {{ .Values.namespaces.orders }}
   labels:
     helm.sh/chart: orders-1.5.0
     app.kubernetes.io/name: orders
@@ -137,6 +145,8 @@ spec:
   progressDeadlineSeconds: 1800
   strategy:
     rollingUpdate:
+      # Never surge: each namespace is capped at 3 pods
+      maxSurge: 0
       maxUnavailable: 1
     type: RollingUpdate
   selector:
@@ -148,6 +158,7 @@ spec:
   template:
     metadata:
       annotations:
+        {{- include "retail-store.podAnnotations" . | nindent 8 }}
         prometheus.io/path: /actuator/prometheus
         prometheus.io/port: "8080"
         prometheus.io/scrape: "true"
@@ -164,7 +175,7 @@ spec:
         - name: orders
           env:
             - name: JAVA_OPTS
-              value: -XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/urandom
+              value: {{ .Values.javaOpts | quote }}
           envFrom:
             - secretRef:
                 name: orders-rabbitmq
@@ -181,6 +192,8 @@ spec:
             runAsUser: 1000
           image: {{ include "retail-store.serviceImage" (dict "root" $ "name" "orders") | quote }}
           imagePullPolicy: IfNotPresent
+          resources:
+            {{- toYaml (index .Values.resources "orders") | nindent 12 }}
           ports:
             - name: http
               containerPort: 8080
@@ -190,12 +203,6 @@ spec:
               path: /actuator/health/readiness
               port: 8080
             initialDelaySeconds: 10
-          resources:
-            limits:
-              memory: 512Mi
-            requests:
-              cpu: 256m
-              memory: 512Mi
           volumeMounts:
             - mountPath: /tmp
               name: tmp-volume
@@ -209,6 +216,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: orders-postgresql
+  namespace: {{ .Values.namespaces.orders }}
   labels:
     helm.sh/chart: orders-1.5.0
     app.kubernetes.io/name: orders
@@ -227,6 +235,8 @@ spec:
       app.kubernetes.io/owner: retail-store-sample
   template:
     metadata:
+      annotations:
+        {{- include "retail-store.podAnnotations" . | nindent 8 }}
       labels:
         app.kubernetes.io/name: orders
         app.kubernetes.io/instance: orders
@@ -237,6 +247,8 @@ spec:
         - name: postgresql
           image: {{ .Values.dependencyImages.postgres | quote }}
           imagePullPolicy: IfNotPresent
+          resources:
+            {{- toYaml (index .Values.resources "ordersPostgresql") | nindent 12 }}
           env:
             - name: POSTGRES_DB
               value: orders
@@ -268,6 +280,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: orders-rabbitmq
+  namespace: {{ .Values.namespaces.orders }}
   labels:
     helm.sh/chart: orders-1.5.0
     app.kubernetes.io/name: orders
@@ -286,6 +299,8 @@ spec:
       app.kubernetes.io/owner: retail-store-sample
   template:
     metadata:
+      annotations:
+        {{- include "retail-store.podAnnotations" . | nindent 8 }}
       labels:
         app.kubernetes.io/name: orders
         app.kubernetes.io/instance: orders
@@ -295,7 +310,13 @@ spec:
       containers:
         - name: rabbitmq
           image: {{ .Values.dependencyImages.rabbitmq | quote }}
+          env:
+            # Default watermark (40% of the small memory limit) blocks publishers
+            - name: RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS
+              value: "-rabbit vm_memory_high_watermark 0.8"
           imagePullPolicy: IfNotPresent
+          resources:
+            {{- toYaml (index .Values.resources "ordersRabbitmq") | nindent 12 }}
           ports:
           - name: amqp
             containerPort: 5672

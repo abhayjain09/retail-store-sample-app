@@ -4,6 +4,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: catalog
+  namespace: {{ .Values.namespaces.catalog }}
   labels:
     helm.sh/chart: catalog-1.5.0
     app.kubernetes.io/name: catalog
@@ -17,6 +18,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: catalog-db
+  namespace: {{ .Values.namespaces.catalog }}
 data:
   RETAIL_CATALOG_PERSISTENCE_USER: "Y2F0YWxvZw=="
   RETAIL_CATALOG_PERSISTENCE_PASSWORD: "eHdaV3g0UXZVTEN5R2c1eQ=="
@@ -26,6 +28,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: catalog
+  namespace: {{ .Values.namespaces.catalog }}
 data:
   RETAIL_CATALOG_PERSISTENCE_PROVIDER: mysql
   RETAIL_CATALOG_PERSISTENCE_ENDPOINT: catalog-mysql:3306
@@ -36,6 +39,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: catalog-mysql
+  namespace: {{ .Values.namespaces.catalog }}
   labels:
     helm.sh/chart: catalog-1.5.0
     app.kubernetes.io/name: catalog
@@ -61,6 +65,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: catalog
+  namespace: {{ .Values.namespaces.catalog }}
   labels:
     helm.sh/chart: catalog-1.5.0
     app.kubernetes.io/name: catalog
@@ -86,6 +91,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: catalog
+  namespace: {{ .Values.namespaces.catalog }}
   labels:
     helm.sh/chart: catalog-1.5.0
     app.kubernetes.io/name: catalog
@@ -99,6 +105,8 @@ spec:
   progressDeadlineSeconds: 1800
   strategy:
     rollingUpdate:
+      # Never surge: each namespace is capped at 3 pods
+      maxSurge: 0
       maxUnavailable: 1
     type: RollingUpdate
   selector:
@@ -110,6 +118,7 @@ spec:
   template:
     metadata:
       annotations:
+        {{- include "retail-store.podAnnotations" . | nindent 8 }}
         prometheus.io/path: /metrics
         prometheus.io/port: "8080"
         prometheus.io/scrape: "true"
@@ -138,6 +147,8 @@ spec:
             runAsUser: 1000
           image: {{ include "retail-store.serviceImage" (dict "root" $ "name" "catalog") | quote }}
           imagePullPolicy: IfNotPresent
+          resources:
+            {{- toYaml (index .Values.resources "catalog") | nindent 12 }}
           ports:
             - name: http
               containerPort: 8080
@@ -146,12 +157,6 @@ spec:
             httpGet:
               path: /health
               port: 8080
-          resources:
-            limits:
-              memory: 256Mi
-            requests:
-              cpu: 256m
-              memory: 256Mi
           volumeMounts:
             - mountPath: /tmp
               name: tmp-volume
@@ -165,6 +170,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: catalog
+  namespace: {{ .Values.namespaces.catalog }}
   labels:
     helm.sh/chart: catalog-1.5.0
     app.kubernetes.io/name: catalog
@@ -178,7 +184,7 @@ spec:
     kind: Deployment
     name: catalog
   minReplicas: 1
-  maxReplicas: 3
+  maxReplicas: {{ .Values.autoscaling.catalog.maxReplicas }}
   metrics:
     - type: Resource
       resource:
@@ -192,6 +198,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: catalog-mysql
+  namespace: {{ .Values.namespaces.catalog }}
   labels:
     helm.sh/chart: catalog-1.5.0
     app.kubernetes.io/name: catalog
@@ -210,6 +217,8 @@ spec:
       app.kubernetes.io/owner: retail-store-sample
   template:
     metadata:
+      annotations:
+        {{- include "retail-store.podAnnotations" . | nindent 8 }}
       labels:
         app.kubernetes.io/name: catalog
         app.kubernetes.io/instance: catalog
@@ -219,7 +228,13 @@ spec:
       containers:
         - name: mysql
           image: {{ .Values.dependencyImages.mysql | quote }}
+          # Small footprint for the 512Mi-per-pod lab cap
+          args:
+            - --performance-schema=OFF
+            - --innodb-buffer-pool-size=32M
           imagePullPolicy: IfNotPresent
+          resources:
+            {{- toYaml (index .Values.resources "catalogMysql") | nindent 12 }}
           env:
             - name: MYSQL_ROOT_PASSWORD
               value: my-secret-pw

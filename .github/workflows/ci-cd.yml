@@ -27,7 +27,7 @@ name: CI/CD — End-to-End Deployment
 # App delivery — Helm + Argo CD (demo-eks-terraform/argocd.tf):
 #   Terraform installs Argo CD (Helm chart argo-cd) and an Argo CD Application
 #   that syncs the Helm chart deploy/helm/retail-store from this repo/branch
-#   into the "default" namespace (auto-sync, prune, self-heal). The private
+#   into the retail-* namespaces (auto-sync, prune, self-heal). The private
 #   ECR registry and image tag are passed as Helm values by Terraform.
 #   Private repo? Add secret ARGOCD_REPO_TOKEN (read-only PAT for this repo).
 # ─────────────────────────────────────────────────────────────────────────────
@@ -373,6 +373,40 @@ jobs:
           echo "Rendered $(grep -c '^kind:' rendered.yaml) objects"
           grep 'image:' rendered.yaml
 
+      # KodeKloud EKS lab limits: 256m CPU / 512Mi per pod, 3 pods per
+      # namespace, 2000m CPU / 4096Mi per cluster. Pods are counted at HPA
+      # max. The reserve covers Argo CD (350m/704Mi), the ALB controller
+      # (100m/192Mi) and the DuckDNS CronJob (50m/32Mi).
+      - name: Check chart against lab pod limits
+        env:
+          RESERVE_CPU_M: 500
+          RESERVE_MEM_MI: 928
+        run: |
+          yq -o=json -I=0 '.' rendered.yaml | jq -s -r \
+            --argjson rcpu "$RESERVE_CPU_M" --argjson rmem "$RESERVE_MEM_MI" '
+            def cpu: if . == null then 1e9 elif endswith("m") then (.[:-1] | tonumber) else (tonumber * 1000) end;
+            def mem: if . == null then 1e9 elif endswith("Gi") then (.[:-2] | tonumber * 1024)
+                     elif endswith("Mi") then (.[:-2] | tonumber) else (tonumber / 1048576) end;
+            map(select(. != null)) as $d
+            | ($d | map(select(.kind == "HorizontalPodAutoscaler")
+                  | {key: "\(.metadata.namespace)/\(.spec.scaleTargetRef.name)", value: .spec.maxReplicas})
+                  | from_entries) as $hpa
+            | [$d[] | select(.kind == "Deployment" or .kind == "StatefulSet")
+               | {ns: .metadata.namespace, name: .metadata.name,
+                  n: ($hpa["\(.metadata.namespace)/\(.metadata.name)"] // .spec.replicas // 1),
+                  cpu: ([.spec.template.spec.containers[].resources.limits.cpu | cpu] | add),
+                  mem: ([.spec.template.spec.containers[].resources.limits.memory | mem] | add)}] as $w
+            | ($w | map("\(.ns)/\(.name): \(.n) x \(.cpu)m / \(.mem)Mi") | .[]),
+              ($w | group_by(.ns) | map("namespace \(.[0].ns): \(map(.n) | add) pods") | .[]),
+              "cluster (incl. platform reserve): \(($w | map(.n * .cpu) | add) + $rcpu)m / \(($w | map(.n * .mem) | add) + $rmem)Mi",
+              ( [ ($w[] | select(.cpu > 256 or .mem > 512) | "pod \(.ns)/\(.name) over 256m/512Mi (limits missing or too high)"),
+                  ($w | group_by(.ns)[] | select((map(.n) | add) > 3) | "namespace \(.[0].ns) over 3 pods"),
+                  (if ($w | map(.n * .cpu) | add) + $rcpu > 2000 then "cluster CPU over 2000m" else empty end),
+                  (if ($w | map(.n * .mem) | add) + $rmem > 4096 then "cluster memory over 4096Mi" else empty end)
+                ] | if length > 0 then (.[] | "LIMIT EXCEEDED: \(.)") else "OK: within lab limits" end )
+          ' | tee limits.txt
+          ! grep -q 'LIMIT EXCEEDED' limits.txt
+
   # ── 7. Terraform — EKS cluster + deploy app ──────────────────────────────
   # Uses demo-eks-terraform/ (committed in this repo) — no external repo clone needed.
   # Patches retail-store.yaml.tftpl image URLs with private ECR before apply.
@@ -573,6 +607,20 @@ jobs:
             esac
           done
 
+          # The argocd namespace and redis secret used to be created by Helm;
+          # Terraform now owns them (no redis-secret-init Job pod).
+          aws eks update-kubeconfig --region "$REGION" --name "$CLUSTER" >/dev/null
+          adopt_k8s() {
+            local ADDR="$1" ID="$2"; shift 2
+            grep -qx "$ADDR" <<<"$STATE" && return 0
+            if "$@" >/dev/null 2>&1; then
+              echo "→ $ID exists outside Terraform — importing into $ADDR"
+              terraform import -input=false "$ADDR" "$ID" || FAILED=1
+            fi
+          }
+          adopt_k8s kubernetes_namespace_v1.argocd argocd kubectl get namespace argocd
+          adopt_k8s kubernetes_secret_v1.argocd_redis argocd/argocd-redis kubectl -n argocd get secret argocd-redis
+
           exit $FAILED
 
       # All vars passed explicitly — no defaults relied on from variables.tf
@@ -718,8 +766,12 @@ jobs:
             ALB_DNS="$ALB_DNS" \
             DUCKDNS_DOMAIN="${{ inputs.app_subdomain }}"
           kubectl set env cronjob/duckdns-sync -n default --from=secret/duckdns-sync
+          # Lab limits: <= 3 pods in the namespace (1 running + 1 + 1 kept) and
+          # explicit per-pod limits
           kubectl patch cronjob duckdns-sync -n default --type=merge \
-            --patch='{"spec":{"concurrencyPolicy":"Forbid","successfulJobsHistoryLimit":1,"failedJobsHistoryLimit":2}}'
+            --patch='{"spec":{"concurrencyPolicy":"Forbid","successfulJobsHistoryLimit":1,"failedJobsHistoryLimit":1}}'
+          kubectl patch cronjob duckdns-sync -n default --type=strategic \
+            --patch='{"spec":{"jobTemplate":{"spec":{"ttlSecondsAfterFinished":600,"template":{"spec":{"containers":[{"name":"duckdns-sync","resources":{"requests":{"cpu":"25m","memory":"32Mi"},"limits":{"cpu":"50m","memory":"32Mi"}}}]}}}}}}'
 
       # The amazon-cloudwatch-observability operator's auto-monitor rewrites every
       # Deployment/StatefulSet to inject OpenTelemetry agents (slow JVM start on
@@ -767,20 +819,25 @@ jobs:
             "instrumentation.opentelemetry.io/inject-nodejs":"false",
             "instrumentation.opentelemetry.io/inject-python":"false",
             "instrumentation.opentelemetry.io/inject-dotnet":"false"}}}}}'
-          for W in $(kubectl get deploy,statefulset -n default -o json | jq -r '
-              .items[]
-              | select((.spec.template.metadata.annotations // {}) | to_entries
-                       | any(.key | startswith("cloudwatch.aws.amazon.com/auto-annotate")))
-              | "\(.kind | ascii_downcase)/\(.metadata.name)"'); do
-            echo "Removing injected agent from $W"
-            kubectl patch "$W" -n default --type=strategic -p "$PATCH"
+          APP_NAMESPACES=$(kubectl get ns -l app.kubernetes.io/part-of=retail-store -o jsonpath='{.items[*].metadata.name}')
+          for APP_NS in $APP_NAMESPACES; do
+            for W in $(kubectl get deploy,statefulset -n "$APP_NS" -o json | jq -r '
+                .items[]
+                | select((.spec.template.metadata.annotations // {}) | to_entries
+                         | any(.key | startswith("cloudwatch.aws.amazon.com/auto-annotate")))
+                | "\(.kind | ascii_downcase)/\(.metadata.name)"'); do
+              echo "Removing injected agent from $APP_NS/$W"
+              kubectl patch "$W" -n "$APP_NS" --type=strategic -p "$PATCH"
+            done
           done
 
-          for W in $(kubectl get deploy,statefulset -n default -o name); do
-            kubectl rollout status "$W" -n default --timeout=20m || true
+          for APP_NS in $APP_NAMESPACES; do
+            for W in $(kubectl get deploy,statefulset -n "$APP_NS" -o name); do
+              kubectl rollout status "$W" -n "$APP_NS" --timeout=20m || true
+            done
           done
 
-          INSTRUMENTED=$(kubectl get pods -n default -o json | jq -r '
+          INSTRUMENTED=$(kubectl get pods -A -l app.kubernetes.io/owner=retail-store-sample -o json | jq -r '
             .items[]
             | select(.status.phase == "Running")
             | select(any(.spec.initContainers[]?; .name | startswith("opentelemetry-auto-instrumentation")))
@@ -794,18 +851,18 @@ jobs:
       - name: Wait for UI deployment
         if: ${{ inputs.action == 'apply' }}
         run: |
-          if kubectl rollout status deployment/ui -n default --timeout=20m; then
+          if kubectl rollout status deployment/ui -n retail-ui --timeout=20m; then
             exit 0
           fi
 
-          echo "::group::Pods in default namespace"
-          kubectl get pods -n default -o wide || true
+          echo "::group::retail-store pods"
+          kubectl get pods -A -l app.kubernetes.io/owner=retail-store-sample -o wide || true
           echo "::endgroup::"
           echo "::group::ui pod details"
-          kubectl describe pod -n default -l app.kubernetes.io/name=ui,app.kubernetes.io/component=service | tail -60 || true
+          kubectl describe pod -n retail-ui -l app.kubernetes.io/name=ui,app.kubernetes.io/component=service | tail -60 || true
           echo "::endgroup::"
           echo "::group::ui logs"
-          kubectl logs -n default deployment/ui --tail=80 --all-containers || true
+          kubectl logs -n retail-ui deployment/ui --tail=80 --all-containers || true
           echo "::endgroup::"
           echo "::group::Node capacity"
           kubectl describe nodes | grep -A8 "Allocated resources" || true
@@ -839,8 +896,7 @@ jobs:
           echo "| Source | \`${TF_VAR_gitops_repo_url}\` @ \`${TF_VAR_gitops_target_revision}\` / \`deploy/helm/retail-store\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Sync / Health | ${SYNC} / ${HEALTH} |" >> $GITHUB_STEP_SUMMARY
           echo "| Revision | ${REV} |" >> $GITHUB_STEP_SUMMARY
-          echo "| UI access | \`kubectl port-forward svc/argocd-server -n argocd 8080:80\` → http://localhost:8080 (user \`admin\`) |" >> $GITHUB_STEP_SUMMARY
-          echo "| Admin password | \`kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' \| base64 -d\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| UI access | \`argocd admin dashboard -n argocd\` → http://localhost:8080 (argocd CLI + your kubeconfig; argocd-server is off to stay within 3 pods per namespace) |" >> $GITHUB_STEP_SUMMARY
 
           if [ "$SYNC" != "Synced" ] || [ "$HEALTH" != "Healthy" ]; then
             echo "Argo CD application is not Synced/Healthy:"

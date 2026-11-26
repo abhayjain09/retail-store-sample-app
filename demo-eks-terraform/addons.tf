@@ -270,7 +270,14 @@ resource "aws_eks_addon" "vpc_cni" {
   addon_version               = local.addon_version["vpc-cni"]
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
-  preserve                    = true
+
+  # The KodeKloud lab denies eks:UpdateAddon/DeleteAddon, so an add-on cannot
+  # be changed after creation. Version and settings apply when it is created
+  # (fresh cluster); later drift is ignored instead of failing the apply.
+  lifecycle {
+    ignore_changes = [addon_version, configuration_values]
+  }
+  preserve = true
 
   # Prefix delegation: each ENI slot gets a /28 (16 IPs) instead of one IP, so
   # a t3.medium is no longer capped at 17 pods. Paired with kubelet
@@ -294,7 +301,14 @@ resource "aws_eks_addon" "kube_proxy" {
   addon_version               = local.addon_version["kube-proxy"]
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
-  preserve                    = true
+
+  # The KodeKloud lab denies eks:UpdateAddon/DeleteAddon, so an add-on cannot
+  # be changed after creation. Version and settings apply when it is created
+  # (fresh cluster); later drift is ignored instead of failing the apply.
+  lifecycle {
+    ignore_changes = [addon_version, configuration_values]
+  }
+  preserve = true
 
   depends_on = [
     kubernetes_config_map.aws_auth,
@@ -308,6 +322,13 @@ resource "aws_eks_addon" "pod_identity_agent" {
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
 
+  # The KodeKloud lab denies eks:UpdateAddon/DeleteAddon, so an add-on cannot
+  # be changed after creation. Version and settings apply when it is created
+  # (fresh cluster); later drift is ignored instead of failing the apply.
+  lifecycle {
+    ignore_changes = [addon_version, configuration_values]
+  }
+
   depends_on = [
     aws_eks_addon.vpc_cni,
   ]
@@ -319,6 +340,13 @@ resource "aws_eks_addon" "node_monitoring_agent" {
   addon_version               = local.addon_version["eks-node-monitoring-agent"]
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
+
+  # The KodeKloud lab denies eks:UpdateAddon/DeleteAddon, so an add-on cannot
+  # be changed after creation. Version and settings apply when it is created
+  # (fresh cluster); later drift is ignored instead of failing the apply.
+  lifecycle {
+    ignore_changes = [addon_version, configuration_values]
+  }
 
   depends_on = [
     aws_eks_addon.vpc_cni,
@@ -374,6 +402,13 @@ resource "aws_eks_addon" "cloudwatch_observability" {
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
 
+  # The KodeKloud lab denies eks:UpdateAddon/DeleteAddon, so an add-on cannot
+  # be changed after creation. Version and settings apply when it is created
+  # (fresh cluster); later drift is ignored instead of failing the apply.
+  lifecycle {
+    ignore_changes = [addon_version, configuration_values]
+  }
+
   # The add-on ships its own Fluent Bit for Container Insights logs. It is turned
   # off while the standalone fluent-bit add-on ships to CloudWatch, otherwise
   # every log line lands in CloudWatch twice. Metrics are unaffected.
@@ -401,6 +436,13 @@ resource "aws_eks_addon" "fluent_bit" {
   configuration_values        = local.fluent_bit_configuration_values
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
+
+  # The KodeKloud lab denies eks:UpdateAddon/DeleteAddon, so an add-on cannot
+  # be changed after creation. Version and settings apply when it is created
+  # (fresh cluster); later drift is ignored instead of failing the apply.
+  lifecycle {
+    ignore_changes = [addon_version, configuration_values]
+  }
 
   timeouts {
     create = "30m"

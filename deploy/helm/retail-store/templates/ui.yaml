@@ -4,6 +4,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: ui
+  namespace: {{ .Values.namespaces.ui }}
   labels:
     helm.sh/chart: ui-1.5.0
     app.kubernetes.io/name: ui
@@ -17,17 +18,19 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: ui
+  namespace: {{ .Values.namespaces.ui }}
 data:
-  RETAIL_UI_ENDPOINTS_CATALOG: http://catalog
-  RETAIL_UI_ENDPOINTS_CARTS: http://carts
-  RETAIL_UI_ENDPOINTS_CHECKOUT: http://checkout
-  RETAIL_UI_ENDPOINTS_ORDERS: http://orders
+  RETAIL_UI_ENDPOINTS_CATALOG: http://catalog.{{ .Values.namespaces.catalog }}.svc
+  RETAIL_UI_ENDPOINTS_CARTS: http://carts.{{ .Values.namespaces.carts }}.svc
+  RETAIL_UI_ENDPOINTS_CHECKOUT: http://checkout.{{ .Values.namespaces.checkout }}.svc
+  RETAIL_UI_ENDPOINTS_ORDERS: http://orders.{{ .Values.namespaces.orders }}.svc
 ---
 # Source: retail-store-sample-ui-chart/templates/service.yaml
 apiVersion: v1
 kind: Service
 metadata:
   name: ui
+  namespace: {{ .Values.namespaces.ui }}
   labels:
     helm.sh/chart: ui-1.5.0
     app.kubernetes.io/name: ui
@@ -52,7 +55,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: ui
-  namespace: default
+  namespace: {{ .Values.namespaces.ui }}
   annotations:
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
@@ -85,6 +88,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ui
+  namespace: {{ .Values.namespaces.ui }}
   labels:
     helm.sh/chart: ui-1.5.0
     app.kubernetes.io/name: ui
@@ -98,6 +102,8 @@ spec:
   progressDeadlineSeconds: 1800
   strategy:
     rollingUpdate:
+      # Never surge: each namespace is capped at 3 pods
+      maxSurge: 0
       maxUnavailable: 1
     type: RollingUpdate
   selector:
@@ -109,6 +115,7 @@ spec:
   template:
     metadata:
       annotations:
+        {{- include "retail-store.podAnnotations" . | nindent 8 }}
         prometheus.io/path: /actuator/prometheus
         prometheus.io/port: "8080"
         prometheus.io/scrape: "true"
@@ -125,7 +132,7 @@ spec:
         - name: ui
           env:
             - name: JAVA_OPTS
-              value: -XX:MaxRAMPercentage=75.0 -Djava.security.egd=file:/dev/urandom
+              value: {{ .Values.javaOpts | quote }}
             - name: RETAIL_UI_AUTH_LOGOUT_URL
               value: {{ .Values.ui.authLogoutUrl | quote }}
             - name: RETAIL_UI_AUTH_SESSION_COOKIE_NAME
@@ -172,6 +179,8 @@ spec:
             runAsUser: 1000
           image: {{ include "retail-store.serviceImage" (dict "root" $ "name" "ui") | quote }}
           imagePullPolicy: IfNotPresent
+          resources:
+            {{- toYaml (index .Values.resources "ui") | nindent 12 }}
           ports:
             - name: http
               containerPort: 8080
@@ -181,12 +190,6 @@ spec:
               path: /actuator/health/readiness
               port: 8080
             initialDelaySeconds: 10
-          resources:
-            limits:
-              memory: 512Mi
-            requests:
-              cpu: 128m
-              memory: 512Mi
           volumeMounts:
             - mountPath: /tmp
               name: tmp-volume
@@ -195,11 +198,13 @@ spec:
           emptyDir:
             medium: Memory
 ---
+{{- if .Values.autoscaling.ui.enabled }}
 # Source: retail-store-sample-ui-chart/templates/hpa.yaml
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: ui
+  namespace: {{ .Values.namespaces.ui }}
   labels:
     helm.sh/chart: ui-1.5.0
     app.kubernetes.io/name: ui
@@ -213,7 +218,7 @@ spec:
     kind: Deployment
     name: ui
   minReplicas: 1
-  maxReplicas: 3
+  maxReplicas: {{ .Values.autoscaling.ui.maxReplicas }}
   metrics:
     - type: Resource
       resource:
@@ -221,3 +226,4 @@ spec:
         target:
           type: Utilization
           averageUtilization: 50
+{{- end }}

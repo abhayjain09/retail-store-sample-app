@@ -24,6 +24,7 @@ removed {
 resource "null_resource" "retail_store_openai_secret" {
   triggers = {
     cluster_name       = aws_eks_cluster.demo_eks.name
+    namespace          = local.retail_store_namespaces.ui
     openai_config_hash = sha256(var.openai_api_key)
   }
 
@@ -38,7 +39,7 @@ resource "null_resource" "retail_store_openai_secret" {
         chat_enabled=false
       fi
 
-      kubectl create secret generic retail-store-openai -n default \
+      kubectl create secret generic retail-store-openai -n ${local.retail_store_namespaces.ui} \
         --from-literal=chat-enabled="$chat_enabled" \
         --from-literal=api-key="$OPENAI_API_KEY" \
         --dry-run=client -o yaml | kubectl apply -f -
@@ -46,15 +47,14 @@ resource "null_resource" "retail_store_openai_secret" {
   }
 
   depends_on = [
-    kubernetes_config_map.aws_auth,
-    aws_cloudformation_stack.autoscaling_group,
+    kubernetes_namespace_v1.retail_store,
   ]
 }
 
 data "kubernetes_ingress_v1" "ui" {
   metadata {
     name      = "ui"
-    namespace = "default"
+    namespace = local.retail_store_namespaces.ui
   }
   depends_on = [null_resource.retail_store_sync]
 }

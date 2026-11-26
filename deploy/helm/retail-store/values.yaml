@@ -27,3 +27,74 @@ ingress:
 ui:
   # Cognito logout URL shown by the UI
   authLogoutUrl: ""
+
+# Opt pods out of CloudWatch Application Signals auto-instrumentation
+applicationSignals:
+  optOut: true
+
+# ---------------------------------------------------------------------------
+# KodeKloud EKS lab limits
+#   - max 3 pods per namespace          -> one namespace per service group,
+#                                          no rollout surge, HPAs capped
+#   - max 256m CPU / 512Mi per pod      -> limits below
+#   - max 2000m CPU / 4096Mi per cluster (sum of limits)
+#
+# Pods per namespace (at HPA max):
+#   retail-catalog  catalog x2 + catalog-mysql                 = 3
+#   retail-carts    carts + carts-dynamodb                     = 2
+#   retail-orders   orders + orders-postgresql + orders-rabbitmq = 3
+#   retail-checkout checkout + checkout-redis                  = 2
+#   retail-ui       ui                                         = 1
+#
+# Sum of limits: 1350m / 2848Mi (1450m / 2976Mi with catalog at 2 replicas).
+# Argo CD + ALB controller add 450m / 896Mi -> 1900m / 3872Mi at peak.
+# ---------------------------------------------------------------------------
+namespaces:
+  catalog: retail-catalog
+  carts: retail-carts
+  orders: retail-orders
+  checkout: retail-checkout
+  ui: retail-ui
+
+autoscaling:
+  catalog:
+    maxReplicas: 2
+  ui:
+    # A second ui replica would exceed the cluster CPU/memory cap
+    enabled: false
+    maxReplicas: 1
+
+# Faster start and smaller footprint for the JVM services under a 250m limit
+javaOpts: -XX:MaxRAMPercentage=75.0 -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -Djava.security.egd=file:/dev/urandom
+
+resources:
+  ui:
+    requests: { cpu: 200m, memory: 512Mi }
+    limits: { cpu: 250m, memory: 512Mi }
+  carts:
+    requests: { cpu: 200m, memory: 448Mi }
+    limits: { cpu: 250m, memory: 448Mi }
+  orders:
+    requests: { cpu: 200m, memory: 448Mi }
+    limits: { cpu: 250m, memory: 448Mi }
+  catalog:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { cpu: 100m, memory: 128Mi }
+  checkout:
+    requests: { cpu: 50m, memory: 160Mi }
+    limits: { cpu: 100m, memory: 160Mi }
+  catalogMysql:
+    requests: { cpu: 50m, memory: 384Mi }
+    limits: { cpu: 100m, memory: 384Mi }
+  cartsDynamodb:
+    requests: { cpu: 50m, memory: 320Mi }
+    limits: { cpu: 100m, memory: 320Mi }
+  ordersPostgresql:
+    requests: { cpu: 25m, memory: 128Mi }
+    limits: { cpu: 50m, memory: 128Mi }
+  ordersRabbitmq:
+    requests: { cpu: 50m, memory: 256Mi }
+    limits: { cpu: 100m, memory: 256Mi }
+  checkoutRedis:
+    requests: { cpu: 25m, memory: 64Mi }
+    limits: { cpu: 50m, memory: 64Mi }

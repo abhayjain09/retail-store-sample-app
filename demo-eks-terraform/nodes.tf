@@ -171,8 +171,28 @@ resource "aws_launch_template" "node_launch_template" {
     device_name = "/dev/xvda"
     ebs {
       delete_on_termination = true
-      volume_size           = 30
-      volume_type           = "gp2"
+      volume_size           = var.node_volume_size
+      volume_type           = "gp3"
+    }
+  }
+
+  # Lab rule: T-series must run in Standard credit mode (t3 defaults to
+  # Unlimited, which gets the lab session suspended).
+  credit_specification {
+    cpu_credits = "standard"
+  }
+
+  # Lab rule: instance shutdown behaviour must be Terminate
+  instance_initiated_shutdown_behavior = "terminate"
+
+  lifecycle {
+    precondition {
+      condition = (
+        var.node_group_max_size <= 10 &&
+        var.node_group_max_size * local.lab_instance_vcpu[var.node_instance_type] <= 10 &&
+        var.node_group_max_size * local.lab_instance_mem_gib[var.node_instance_type] <= 20
+      )
+      error_message = "node_group_max_size x node_instance_type exceeds the lab limit of 10 instances / 10 vCPU / 20 GiB."
     }
   }
 
@@ -181,7 +201,7 @@ resource "aws_launch_template" "node_launch_template" {
   }
 
   key_name      = aws_key_pair.eks_kp.key_name
-  instance_type = "t3.medium"
+  instance_type = var.node_instance_type
   vpc_security_group_ids = [
     aws_security_group.node_security_group.id
   ]

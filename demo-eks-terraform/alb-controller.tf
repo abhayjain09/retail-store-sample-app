@@ -369,6 +369,29 @@ resource "helm_release" "alb_controller" {
 
   # WAFv2/WAF/Shield are blocked by an org-level SCP in this account.
   # Disable so the controller does not call those APIs on every reconcile.
+  # Lab limits (3 pods per namespace, 256m / 512Mi per pod, 2000m / 4096Mi
+  # per cluster): one replica with explicit limits.
+  set {
+    name  = "replicaCount"
+    value = "1"
+  }
+  set {
+    name  = "resources.requests.cpu"
+    value = "50m"
+  }
+  set {
+    name  = "resources.requests.memory"
+    value = "128Mi"
+  }
+  set {
+    name  = "resources.limits.cpu"
+    value = "100m"
+  }
+  set {
+    name  = "resources.limits.memory"
+    value = "192Mi"
+  }
+
   set {
     name  = "enableShield"
     value = "false"
