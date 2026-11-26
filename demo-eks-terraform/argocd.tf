@@ -258,10 +258,27 @@ resource "helm_release" "argocd_apps" {
   repository = "https://argoproj.github.io/argo-helm"
 
   values = [yamlencode({
+    # Argo CD's built-in "default" project is created by argocd-server on
+    # startup; that pod is off (3-pods-per-namespace limit), so the app gets
+    # its own project, limited to this repo and the retail-* namespaces.
+    projects = {
+      (local.retail_store_app) = {
+        namespace   = local.argocd_namespace
+        description = "retail-store sample app"
+        sourceRepos = [var.gitops_repo_url]
+        destinations = [for ns in values(local.retail_store_namespaces) : {
+          server    = "https://kubernetes.default.svc"
+          namespace = ns
+        }]
+        # The chart has no cluster-scoped objects (Terraform owns the namespaces)
+        clusterResourceWhitelist   = []
+        namespaceResourceWhitelist = [{ group = "*", kind = "*" }]
+      }
+    }
     applications = {
       (local.retail_store_app) = {
         namespace = local.argocd_namespace
-        project   = "default"
+        project   = local.retail_store_app
         # Deleting the Application deletes its resources (incl. the ALB ingress)
         finalizers = ["resources-finalizer.argocd.argoproj.io"]
         source = {
